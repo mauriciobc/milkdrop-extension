@@ -55,9 +55,6 @@ uniform sampler2D uWarpOutput;
 uniform float uTime;
 uniform float uEnergy;
 uniform float uBass;
-uniform float uMid;
-uniform float uHigh;
-uniform float uDecay;
 varying vec2 vTexCoord;
 void main() {
     vec4 color = texture2D(uWarpOutput, vTexCoord);
@@ -175,10 +172,7 @@ void main() {
 uniform sampler2D uWarpOutput;
 uniform float uTime;
 uniform float uEnergy;
-uniform float uBass;
-uniform float uMid;
 uniform float uHigh;
-uniform float uDecay;
 varying vec2 vTexCoord;
 void main() {
     vec2 p = vTexCoord - vec2(0.5);
@@ -216,7 +210,6 @@ void main() {
 uniform float uTime;
 uniform float uEnergy;
 uniform float uBass;
-uniform float uMid;
 uniform float uHigh;
 uniform vec2 uResolution;
 void main() {
@@ -301,10 +294,7 @@ void main() {
 uniform sampler2D uWarpOutput;
 uniform float uTime;
 uniform float uEnergy;
-uniform float uBass;
 uniform float uMid;
-uniform float uHigh;
-uniform float uDecay;
 varying vec2 vTexCoord;
 void main() {
     vec4 color = texture2D(uWarpOutput, vTexCoord);

@@ -105,18 +105,21 @@ export class AudioEngine {
         this._spectrumParserMode = 'auto';
         this._regexFallbackCount = 0;
         this._fallbackNoticeKey = null;
-        this._energyHistory = [];
-        this._bassHistory = [];
-        this._beatCooldown = 0;
+        this._resetBeatHistory();
         this._stopPipeline();
         this._features = this._buildDefaultFeatures(this._features.source, false);
     }
 
     getFeatures() {
         const sensitivity = Math.max(0.1, this._settings?.get_double?.('audio-sensitivity') ?? 1.0);
+        const hasRecentSignal = this._enabled && this._hasRecentSignal();
+        if (!hasRecentSignal && this._energyHistory.length > 0)
+            this._resetBeatHistory();
+
         const features = {
             ...this._features,
-            active: this._enabled && this._hasRecentSignal(),
+            active: hasRecentSignal,
+            beat: hasRecentSignal ? this._features.beat : 0,
         };
 
         return {
@@ -245,6 +248,7 @@ export class AudioEngine {
         this._pipeline = null;
         this._bus = null;
         this._lastUpdateUsec = 0;
+        this._resetBeatHistory();
     }
 
     _buildPipelineDescription(sourceElement) {
@@ -340,6 +344,7 @@ export class AudioEngine {
         case Gst.MessageType.ERROR: {
             const [error] = message.parse_error();
             this._logger.warn?.(`milkdrop audio bus error: ${error.message}`);
+            this._resetBeatHistory();
             this._features = this._buildDefaultFeatures(this._resolveActiveSourceName(), false);
             this._lastUpdateUsec = 0;
             this._schedulePipelineRestart(error.message);
@@ -370,6 +375,10 @@ export class AudioEngine {
                 this._logger.info?.(`milkdrop audio spectrum message ignored: bands.length=0 (parse failed or wrong format) count=${this._spectrumEmptyCount}`);
             return;
         }
+
+        const nowUsec = GLib.get_monotonic_time();
+        if (this._lastUpdateUsec && nowUsec - this._lastUpdateUsec >= SIGNAL_TIMEOUT_USEC)
+            this._resetBeatHistory();
 
         const third = Math.max(1, Math.floor(bands.length / 3));
         const bass = average(bands.slice(0, third));
@@ -405,7 +414,6 @@ export class AudioEngine {
         const decay = Math.max(energy, this._features.decay * FEATURE_DECAY);
 
         this._spectrumCount += 1;
-        const nowUsec = GLib.get_monotonic_time();
 
         if (this._spectrumCount === 1) {
             this._logger.warn?.(`milkdrop audio first spectrum received source=${this._resolveActiveSourceName()} bands=${bands.length}`);
@@ -519,20 +527,17 @@ export class AudioEngine {
                 const arr = structure.get_array('magnitude');
                 if (!arr || arr.length === 0)
                     return null;
-                const firstVals = this._extractFloatsFromVariant(arr[0]);
-                const isMultiChannel = arr.length > 1 && firstVals.length > 1;
-                if (isMultiChannel) {
-                    const channelBands = [firstVals];
-                    for (let c = 1; c < arr.length; c++) {
-                        const vals = this._extractFloatsFromVariant(arr[c]);
-                        if (vals.length > 0)
-                            channelBands.push(vals);
-                    }
+                const channelBands = Array.from(arr)
+                    .map(value => this._extractFloatsFromVariant(value))
+                    .filter(values => values.length > 0);
+                if (channelBands.length === 0)
+                    return null;
+                const isMultiChannel = channelBands.length > 1 && channelBands.some(values => values.length > 1);
+                if (isMultiChannel)
                     return this._mergeChannelBands(channelBands);
-                }
-                if (firstVals.length > 0)
-                    return firstVals.map(v => normalizeDecibels(v, SPECTRUM_THRESHOLD_DB));
-                return Array.from(arr).map(v => normalizeDecibels(Number(v), SPECTRUM_THRESHOLD_DB)).filter(Number.isFinite);
+                if (channelBands.length > 1)
+                    return channelBands.map(values => normalizeDecibels(values[0], SPECTRUM_THRESHOLD_DB)).filter(Number.isFinite);
+                return channelBands[0].map(v => normalizeDecibels(v, SPECTRUM_THRESHOLD_DB)).filter(Number.isFinite);
             }
             const value = structure.get_value?.('magnitude');
             if (value && typeof value.n_children === 'function') {
@@ -670,6 +675,16 @@ export class AudioEngine {
             high: 0,
             beat: 0,
             decay: 0,
+        };
+    }
+
+    _resetBeatHistory() {
+        this._energyHistory = [];
+        this._bassHistory = [];
+        this._beatCooldown = 0;
+        this._features = {
+            ...this._features,
+            beat: 0,
         };
     }
 

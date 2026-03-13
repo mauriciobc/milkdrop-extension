@@ -22,6 +22,33 @@ export async function run(assert) {
     }
 
     {
+        const preset = await store.loadPreset('builtin:fractal-bloom');
+        assert(preset.id === 'builtin:fractal-bloom', 'fractal-bloom preset has correct id');
+        assert(!preset.shaders, 'fractal-bloom has no shaders configured');
+    }
+
+    {
+        const preset = await store.loadPreset('builtin:particle-comet');
+        assert(preset.id === 'builtin:particle-comet', 'particle-comet preset has correct id');
+        assert(preset.shaders && typeof preset.shaders.draw === 'string', 'particle-comet is draw-only');
+        assert(!preset.shaders.warp && !preset.shaders.composite, 'particle-comet has no warp/composite shader');
+    }
+
+    {
+        const preset = await store.loadPreset('builtin:waveform-lattice');
+        assert(preset.id === 'builtin:waveform-lattice', 'waveform-lattice preset has correct id');
+        assert(preset.shaders && typeof preset.shaders.composite === 'string', 'waveform-lattice is composite-only');
+        assert(!preset.shaders.draw && !preset.shaders.warp, 'waveform-lattice has no draw/warp shader');
+    }
+
+    {
+        const preset = await store.loadPreset('builtin:supernova-kick');
+        assert(preset.id === 'builtin:supernova-kick', 'supernova-kick preset has correct id');
+        assert(preset.shaders && typeof preset.shaders.draw === 'string', 'supernova-kick is draw-only');
+        assert(!preset.shaders.warp && !preset.shaders.composite, 'supernova-kick has no warp/composite shader');
+    }
+
+    {
         const first = await store.loadPreset('builtin:supernova-kick');
         first.frame.zoom.base = 999;
         const second = await store.loadPreset('builtin:supernova-kick');

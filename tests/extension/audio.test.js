@@ -1,3 +1,5 @@
+import GLib from 'gi://GLib';
+
 import {AudioEngine} from '../../src/extension/audio.js';
 
 function buildLogger(logs) {
@@ -35,7 +37,60 @@ function makeRegexOnlySpectrum(serialized) {
     };
 }
 
+function makeSpectrumMessage(structure) {
+    return {
+        get_structure() {
+            return {
+                ...structure,
+                get_name() {
+                    return 'spectrum';
+                },
+            };
+        },
+    };
+}
+
 export function run(assert) {
+    // Stopping the pipeline clears beat history state to avoid stale carryover.
+    {
+        const engine = new AudioEngine({logger: buildLogger([])});
+        engine._energyHistory = [0.3, 0.4, 0.5];
+        engine._bassHistory = [0.2, 0.25, 0.3];
+        engine._beatCooldown = 2;
+        engine._features = {
+            ...engine._features,
+            beat: 1,
+        };
+
+        engine._stopPipeline();
+
+        assert(engine._energyHistory.length === 0, '_stopPipeline clears energy history');
+        assert(engine._bassHistory.length === 0, '_stopPipeline clears bass history');
+        assert(engine._beatCooldown === 0, '_stopPipeline resets beat cooldown');
+        assert(engine._features.beat === 0, '_stopPipeline clears stale beat value');
+    }
+
+    // A long signal gap resets history before processing the next spectrum frame.
+    {
+        const engine = new AudioEngine({logger: buildLogger([])});
+        engine._enabled = true;
+        engine._energyHistory = [0.7, 0.75, 0.72, 0.71, 0.74];
+        engine._bassHistory = [0.6, 0.62, 0.63, 0.61, 0.64];
+        engine._beatCooldown = 1;
+        engine._features = {
+            ...engine._features,
+            beat: 1,
+        };
+        engine._lastUpdateUsec = GLib.get_monotonic_time() - 1_000_000;
+
+        const message = makeSpectrumMessage(makeStructuredSpectrum([-40.0, -30.0, -20.0, -10.0, -20.0, -30.0]));
+        engine._handleSpectrumMessage(message);
+
+        assert(engine._energyHistory.length === 1, 'spectrum after timeout starts a fresh energy history window');
+        assert(engine._bassHistory.length === 1, 'spectrum after timeout starts a fresh bass history window');
+        assert(engine._features.beat === 0, 'spectrum after timeout does not reuse stale beat state');
+    }
+
     // Structured parser mode stays locked and does not bounce to regex fallback.
     {
         const logs = [];
@@ -49,6 +104,28 @@ export function run(assert) {
         assert(first.length === 3, 'structured spectrum parser returns expected band count');
         assert(engine._spectrumParserMode === 'structured', 'structured parser locks parser mode to structured');
         assert(second.length === 0, 'structured mode avoids regex fallback once capability is known');
+    }
+
+    // Structured parser averages channelized vectors into one value per band.
+    {
+        const engine = new AudioEngine({logger: buildLogger([])});
+        const structured = makeStructuredSpectrum([[-40.0, -20.0, -10.0], [-30.0, -10.0, -30.0]]);
+        const bands = engine._parseSpectrumBands(structured);
+        const epsilon = 1e-6;
+
+        assert(bands.length === 3, 'structured parser flattens channelized spectrum to band count');
+        assert(Math.abs(bands[0] - 0.5625) <= epsilon, 'band 0 matches normalized channel average for -35 dB');
+        assert(Math.abs(bands[1] - 0.8125) <= epsilon, 'band 1 matches normalized channel average for -15 dB');
+        assert(Math.abs(bands[2] - 0.75) <= epsilon, 'band 2 matches normalized channel average for -20 dB');
+    }
+
+    // Structured parser accepts a single nested channel vector shape.
+    {
+        const engine = new AudioEngine({logger: buildLogger([])});
+        const structured = makeStructuredSpectrum([[-40.0, -20.0, -10.0]]);
+        const bands = engine._parseSpectrumBands(structured);
+
+        assert(bands.length === 3, 'structured parser supports one nested vector of bands');
     }
 
     // Regex fallback mode activates once and tracks usage.
