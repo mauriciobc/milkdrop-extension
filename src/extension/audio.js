@@ -4,8 +4,13 @@ import Gst from 'gi://Gst?version=1.0';
 const SPECTRUM_THRESHOLD_DB = -80;
 const FEATURE_DECAY = 0.82;
 const FEATURE_SMOOTHING = 0.35;
-const BEAT_THRESHOLD = 0.08;
 const SPECTRUM_BANDS = 24;
+const BEAT_HISTORY_SIZE = 20;
+const BEAT_NOISE_FLOOR = 0.02;
+const BEAT_THRESHOLD_LOW = 1.2;
+const BEAT_THRESHOLD_HIGH = 1.55;
+const BEAT_THRESHOLD_VARIANCE_SLOPE = -15;
+const BEAT_COOLDOWN_FRAMES = 2;
 const SIGNAL_TIMEOUT_USEC = 750000;
 const DEFAULT_PULSE_MONITOR = '@DEFAULT_MONITOR@';
 const MAX_PIPELINE_RESTARTS = 3;
@@ -33,6 +38,14 @@ function average(values) {
         return 0;
 
     return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function variance(values, mean) {
+    if (!values || values.length === 0)
+        return 0;
+
+    const m = mean ?? average(values);
+    return values.reduce((sum, value) => sum + (value - m) ** 2, 0) / values.length;
 }
 
 function normalizeDecibels(value, thresholdDb) {
@@ -70,6 +83,9 @@ export class AudioEngine {
         this._features = this._buildDefaultFeatures('stub', false);
         this._noSpectrumWarnId = 0;
         this._loggedNonSpectrumElement = false;
+        this._energyHistory = [];
+        this._bassHistory = [];
+        this._beatCooldown = 0;
     }
 
     enable() {
@@ -89,6 +105,9 @@ export class AudioEngine {
         this._spectrumParserMode = 'auto';
         this._regexFallbackCount = 0;
         this._fallbackNoticeKey = null;
+        this._energyHistory = [];
+        this._bassHistory = [];
+        this._beatCooldown = 0;
         this._stopPipeline();
         this._features = this._buildDefaultFeatures(this._features.source, false);
     }
@@ -357,9 +376,32 @@ export class AudioEngine {
         const mid = average(bands.slice(third, third * 2));
         const high = average(bands.slice(third * 2));
         const energy = average(bands);
-        const energyRise = energy - this._features.energy;
-        const bassRise = bass - this._features.bass;
-        const beat = (energyRise >= BEAT_THRESHOLD || bassRise >= BEAT_THRESHOLD) ? 1 : 0;
+
+        this._energyHistory.push(energy);
+        this._bassHistory.push(bass);
+        if (this._energyHistory.length > BEAT_HISTORY_SIZE) {
+            this._energyHistory.shift();
+            this._bassHistory.shift();
+        }
+
+        let beat = 0;
+        if (this._beatCooldown > 0) {
+            this._beatCooldown -= 1;
+        } else if (this._energyHistory.length >= 5) {
+            const avgE = average(this._energyHistory);
+            const avgB = average(this._bassHistory);
+            const varE = variance(this._energyHistory, avgE);
+            const varB = variance(this._bassHistory, avgB);
+            const threshE = Math.max(BEAT_THRESHOLD_LOW, Math.min(BEAT_THRESHOLD_HIGH, BEAT_THRESHOLD_VARIANCE_SLOPE * varE + BEAT_THRESHOLD_HIGH));
+            const threshB = Math.max(BEAT_THRESHOLD_LOW, Math.min(BEAT_THRESHOLD_HIGH, BEAT_THRESHOLD_VARIANCE_SLOPE * varB + BEAT_THRESHOLD_HIGH));
+            const energyBeat = (energy - BEAT_NOISE_FLOOR) > threshE * avgE && avgE > BEAT_NOISE_FLOOR;
+            const bassBeat = (bass - BEAT_NOISE_FLOOR) > threshB * avgB && avgB > BEAT_NOISE_FLOOR;
+            if (energyBeat || bassBeat) {
+                beat = 1;
+                this._beatCooldown = BEAT_COOLDOWN_FRAMES;
+            }
+        }
+
         const decay = Math.max(energy, this._features.decay * FEATURE_DECAY);
 
         this._spectrumCount += 1;
