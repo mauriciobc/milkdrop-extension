@@ -24,10 +24,13 @@ async function main() {
     const runTest = async (name, modulePath) => {
         try {
             const mod = await import(modulePath);
-            if (typeof mod.run === 'function')
-                mod.run(assert);
-            else
+            if (typeof mod.run === 'function') {
+                const maybePromise = mod.run(assert);
+                if (maybePromise && typeof maybePromise.then === 'function')
+                    await maybePromise;
+            } else {
                 assert(false, `${name}: module has no run(assert) export`);
+            }
         } catch (e) {
             failed++;
             console.error(`${name}: ${e.message}`);
@@ -37,6 +40,7 @@ async function main() {
     };
 
     await runTest('extension/evaluator', './extension/evaluator.test.js');
+    await runTest('extension/presets', './extension/presets.test.js');
     await runTest('extension/audio', './extension/audio.test.js');
     await runTest('extension/window-title', './extension/window-title.test.js');
     await runTest('renderer/vertex-eval', './renderer/vertex-eval.test.js');
