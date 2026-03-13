@@ -1,0 +1,8 @@
+{
+  "uuid": "@uuid@",
+  "name": "GNOME Milkdrop",
+  "description": "MilkDrop-style desktop visualization renderer for GNOME Shell.",
+  "shell-version": ["47", "48", "49"],
+  "url": "@url@",
+  "settings-schema": "@schema_id@"
+}

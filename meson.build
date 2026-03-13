@@ -1,0 +1,95 @@
+project(
+  'gnome-milkdrop',
+  version: '0.1.0',
+  license: 'GPL-2.0-or-later',
+  meson_version: '>= 0.56.0'
+)
+
+has_c_compiler = add_languages('c', native: false, required: false)
+
+uuid = 'milkdrop@mauriciobc.github.io'
+schema_id = 'org.gnome.shell.extensions.milkdrop'
+
+prefix = get_option('prefix')
+datadir = join_paths(prefix, get_option('datadir'))
+extension_dir = join_paths(datadir, 'gnome-shell', 'extensions', uuid)
+
+metadata_conf = configuration_data()
+metadata_conf.set('uuid', uuid)
+metadata_conf.set('schema_id', schema_id)
+metadata_conf.set('url', 'https://github.com/mauriciobc/gnome-milkdrop')
+
+configure_file(
+  input: 'src/extension/metadata.json.in',
+  output: 'metadata.json',
+  configuration: metadata_conf,
+  install: true,
+  install_dir: extension_dir
+)
+
+extension_sources = files(
+  'src/extension/audio.js',
+  'src/extension/evaluator.js',
+  'src/extension/extension.js',
+  'src/extension/gnomeShellOverride.js',
+  'src/extension/ipc.js',
+  'src/extension/monitor.js',
+  'src/extension/prefs.js',
+  'src/extension/presets.js',
+  'src/extension/windowTitle.js',
+  'src/extension/wallpaper.js'
+)
+
+renderer_sources = files(
+  'src/renderer/gl-bridge.js',
+  'src/renderer/glarea.js',
+  'src/renderer/ipc-client.js',
+  'src/renderer/mesh.js',
+  'src/renderer/renderer.js',
+  'src/renderer/shaders.js',
+  'src/renderer/vertex-eval.js'
+)
+
+if has_c_compiler
+  c_compiler = meson.get_compiler('c')
+  egl_dep = dependency('egl', required: false)
+  epoxy_dep = dependency('epoxy', required: false)
+  glib_dep = dependency('glib-2.0', required: false)
+  gio_unix_dep = dependency('gio-unix-2.0', required: false)
+  json_glib_dep = dependency('json-glib-1.0', required: false)
+  math_dep = c_compiler.find_library('m', required: false)
+
+  if egl_dep.found() and epoxy_dep.found() and glib_dep.found() and json_glib_dep.found() and gio_unix_dep.found()
+    executable(
+      'milkdrop-gl-helper',
+      'src/renderer/gl-helper.c',
+      dependencies: [egl_dep, epoxy_dep, glib_dep, gio_unix_dep, json_glib_dep, math_dep],
+      install: true,
+      install_dir: join_paths(extension_dir, 'renderer')
+    )
+  else
+    message('Skipping milkdrop-gl-helper build because EGL, epoxy, glib-2.0, gio-unix-2.0, or json-glib-1.0 is unavailable')
+  endif
+else
+  message('Skipping milkdrop-gl-helper build because no C compiler is available')
+endif
+
+install_data(extension_sources, install_dir: extension_dir)
+install_data(renderer_sources, install_dir: join_paths(extension_dir, 'renderer'))
+install_data(
+  'src/extension/schemas/@0@.gschema.xml'.format(schema_id),
+  install_dir: join_paths(extension_dir, 'schemas')
+)
+
+# Unit tests (GJS)
+gjs = find_program('gjs', required: false)
+if gjs.found()
+  test(
+    'unit-tests',
+    gjs,
+    args: ['-m', 'tests/run.js'],
+    workdir: meson.project_source_root(),
+  )
+else
+  message('GJS not found; unit tests will not be run')
+endif

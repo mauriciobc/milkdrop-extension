@@ -1,0 +1,23 @@
+name: Test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GJS and Meson
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gjs meson ninja-build
+
+      - name: Run unit tests
+        run: |
+          meson setup build
+          meson test -C build unit-tests
