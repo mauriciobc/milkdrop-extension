@@ -114,6 +114,209 @@ const BUILTIN_PRESETS = [
             warpType: 'wave',
         },
     },
+    {
+        id: 'builtin:fractal-bloom',
+        name: 'Fractal Bloom',
+        description: 'Web-inspired fractal pulse with smooth radial bloom.',
+        source: 'builtin',
+        frame: {
+            zoom: {base: 1.015, amplitude: 0.02, frequency: 0.21, waveform: 'sin', audioScale: 0.05},
+            rot: {base: 0.0015, amplitude: 0.018, frequency: 0.17, waveform: 'cos', audioScale: 0.05},
+            dx: {base: 0.0, amplitude: 0.008, frequency: 0.24, waveform: 'sin', audioScale: 0.02},
+            dy: {base: 0.0, amplitude: 0.01, frequency: 0.2, waveform: 'cos', audioScale: 0.03},
+            decay: {base: 0.965, amplitude: 0.006, frequency: 0.08, waveform: 'sin'},
+        },
+        vertex: {
+            warpAmount: 0.028,
+            warpSpeed: 0.7,
+            warpScale: 1.4,
+            warpType: 'radial',
+        },
+    },
+    {
+        id: 'builtin:hypnotic-tunnel',
+        name: 'Hypnotic Tunnel',
+        description: 'Hypnotic category inspired tunnel with rotational pull.',
+        source: 'builtin',
+        frame: {
+            zoom: {base: 1.03, amplitude: 0.016, frequency: 0.3, waveform: 'sin', audioScale: 0.07},
+            rot: {base: 0.008, amplitude: 0.02, frequency: 0.22, waveform: 'sin', audioScale: 0.04},
+            dx: {base: 0.0, amplitude: 0.004, frequency: 0.12, waveform: 'cos'},
+            dy: {base: 0.0, amplitude: 0.004, frequency: 0.14, waveform: 'sin'},
+            decay: {base: 0.958, amplitude: 0.004, frequency: 0.09, waveform: 'cos'},
+        },
+        vertex: {
+            warpAmount: 0.03,
+            warpSpeed: 0.9,
+            warpScale: 1.7,
+            warpType: 'angular',
+        },
+        shaders: {
+            draw: `precision mediump float;
+uniform float uTime;
+uniform float uEnergy;
+uniform float uBass;
+uniform float uMid;
+uniform float uHigh;
+uniform vec2 uResolution;
+void main() {
+    vec2 uv = gl_FragCoord.xy / uResolution;
+    vec2 p = uv - vec2(0.5);
+    float dist = max(length(p), 0.001);
+    float angle = atan(p.y, p.x);
+    float rings = sin(28.0 * dist - uTime * 4.0 + uBass * 22.0);
+    float spiral = sin(angle * 11.0 + uTime * 1.8 + uMid * 14.0);
+    float tunnel = smoothstep(0.95, 0.03, dist);
+    vec3 color = vec3(0.25 + 0.45 * rings, 0.2 + 0.6 * spiral, 0.3 + 0.5 * (rings * spiral));
+    color *= tunnel * (0.35 + uEnergy * 2.4);
+    gl_FragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
+}`,
+            composite: `precision mediump float;
+uniform sampler2D uWarpOutput;
+uniform float uTime;
+uniform float uEnergy;
+uniform float uBass;
+uniform float uMid;
+uniform float uHigh;
+uniform float uDecay;
+varying vec2 vTexCoord;
+void main() {
+    vec2 p = vTexCoord - vec2(0.5);
+    float r = length(p);
+    float a = atan(p.y, p.x);
+    vec2 drift = vec2(cos(a + uTime * 0.4), sin(a - uTime * 0.35)) * (0.003 + uHigh * 0.01);
+    vec4 color = texture2D(uWarpOutput, vTexCoord + drift);
+    float edge = smoothstep(0.95, 0.2, r);
+    float pulse = 1.0 + sin(uTime * 2.2 + r * 20.0) * 0.05 + uEnergy * 0.7;
+    color.rgb *= edge * pulse;
+    gl_FragColor = clamp(color, 0.0, 1.0);
+}`,
+        },
+    },
+    {
+        id: 'builtin:particle-comet',
+        name: 'Particle Comet',
+        description: 'Particles-inspired streaks with bright audio-driven tails.',
+        source: 'builtin',
+        frame: {
+            zoom: {base: 1.0, amplitude: 0.018, frequency: 0.42, waveform: 'cos', audioScale: 0.05},
+            rot: {base: 0.0, amplitude: 0.012, frequency: 0.35, waveform: 'sin', audioScale: 0.03},
+            dx: {base: 0.0, amplitude: 0.018, frequency: 0.33, waveform: 'sin', audioScale: 0.04},
+            dy: {base: 0.0, amplitude: 0.014, frequency: 0.28, waveform: 'cos', audioScale: 0.04},
+            decay: {base: 0.962, amplitude: 0.012, frequency: 0.14, waveform: 'sin'},
+        },
+        vertex: {
+            warpAmount: 0.02,
+            warpSpeed: 1.5,
+            warpScale: 1.1,
+            warpType: 'wave',
+        },
+        shaders: {
+            draw: `precision mediump float;
+uniform float uTime;
+uniform float uEnergy;
+uniform float uBass;
+uniform float uMid;
+uniform float uHigh;
+uniform vec2 uResolution;
+void main() {
+    vec2 uv = gl_FragCoord.xy / uResolution;
+    vec2 p = uv - vec2(0.5);
+    float t = uTime;
+    float comet = 0.0;
+    for (int i = 0; i < 3; i++) {
+        float fi = float(i);
+        vec2 center = vec2(sin(t * (0.8 + fi * 0.25) + fi * 2.1), cos(t * (0.6 + fi * 0.2) + fi * 1.7)) * 0.28;
+        vec2 d = p - center;
+        float len = length(d * vec2(0.8, 1.6));
+        comet += 0.015 / (len + 0.03 + fi * 0.01);
+    }
+    float lane = sin((uv.y + t * 0.2) * 52.0 + uBass * 28.0) * 0.5 + 0.5;
+    float spark = pow(max(0.0, lane), 6.0) * (0.35 + uHigh * 1.8);
+    vec3 color = vec3(comet * (0.4 + uEnergy * 2.0), comet * 0.5 + spark * 0.6, comet * 1.1 + spark);
+    gl_FragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
+}`,
+        },
+    },
+    {
+        id: 'builtin:supernova-kick',
+        name: 'Supernova Kick',
+        description: 'Supernova style burst that spikes with kick energy.',
+        source: 'builtin',
+        frame: {
+            zoom: {base: 1.02, amplitude: 0.022, frequency: 0.32, waveform: 'sin', audioScale: 0.09},
+            rot: {base: 0.002, amplitude: 0.018, frequency: 0.27, waveform: 'cos', audioScale: 0.03},
+            dx: {base: 0.0, amplitude: 0.009, frequency: 0.2, waveform: 'sin', audioScale: 0.04},
+            dy: {base: 0.0, amplitude: 0.009, frequency: 0.23, waveform: 'cos', audioScale: 0.04},
+            decay: {base: 0.952, amplitude: 0.008, frequency: 0.17, waveform: 'sin'},
+        },
+        vertex: {
+            warpAmount: 0.033,
+            warpSpeed: 1.05,
+            warpScale: 1.35,
+            warpType: 'radial',
+        },
+        shaders: {
+            draw: `precision mediump float;
+uniform float uTime;
+uniform float uEnergy;
+uniform float uBass;
+uniform float uMid;
+uniform float uHigh;
+uniform vec2 uResolution;
+void main() {
+    vec2 uv = gl_FragCoord.xy / uResolution;
+    vec2 p = uv - vec2(0.5);
+    float r = max(length(p), 0.001);
+    float a = atan(p.y, p.x);
+    float star = abs(sin(a * 9.0 + uTime * 3.2 + uHigh * 10.0));
+    float ring = sin(r * 45.0 - uTime * 6.0 + uBass * 30.0) * 0.5 + 0.5;
+    float core = 0.03 / (r + 0.02);
+    float burst = (core + ring * 0.7 + star * 0.5) * (0.25 + uEnergy * 2.8);
+    vec3 color = vec3(burst * 1.2, burst * (0.5 + uMid * 0.7), burst * 0.35);
+    gl_FragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
+}`,
+        },
+    },
+    {
+        id: 'builtin:waveform-lattice',
+        name: 'Waveform Lattice',
+        description: 'Waveform-inspired grid of oscillating audio ribbons.',
+        source: 'builtin',
+        frame: {
+            zoom: {base: 1.0, amplitude: 0.01, frequency: 0.5, waveform: 'sin', audioScale: 0.03},
+            rot: {base: 0.0, amplitude: 0.01, frequency: 0.41, waveform: 'cos', audioScale: 0.02},
+            dx: {base: 0.0, amplitude: 0.012, frequency: 0.48, waveform: 'sin', audioScale: 0.03},
+            dy: {base: 0.0, amplitude: 0.012, frequency: 0.46, waveform: 'cos', audioScale: 0.03},
+            decay: {base: 0.968, amplitude: 0.007, frequency: 0.12, waveform: 'cos'},
+        },
+        vertex: {
+            warpAmount: 0.018,
+            warpSpeed: 1.35,
+            warpScale: 1.0,
+            warpType: 'wave',
+        },
+        shaders: {
+            composite: `precision mediump float;
+uniform sampler2D uWarpOutput;
+uniform float uTime;
+uniform float uEnergy;
+uniform float uBass;
+uniform float uMid;
+uniform float uHigh;
+uniform float uDecay;
+varying vec2 vTexCoord;
+void main() {
+    vec4 color = texture2D(uWarpOutput, vTexCoord);
+    float linesX = sin((vTexCoord.x + uTime * 0.08) * 140.0);
+    float linesY = sin((vTexCoord.y - uTime * 0.05) * 120.0);
+    float lattice = linesX * linesY;
+    color.rgb += vec3(0.08, 0.22, 0.35) * lattice * (0.4 + uMid * 1.1);
+    color.rgb *= 1.0 + uEnergy * 1.3;
+    gl_FragColor = clamp(color, 0.0, 1.0);
+}`,
+        },
+    },
 ];
 
 function clonePreset(preset) {
