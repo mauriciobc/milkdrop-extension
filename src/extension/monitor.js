@@ -9,11 +9,14 @@ import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
 import {AudioEngine} from './audio.js';
 import {Evaluator} from './evaluator.js';
 import {IpcServer} from './ipc.js';
+import {perfBegin, perfEnd} from './perf.js';
 import {PresetStore} from './presets.js';
 import {parseRendererWindowTitle, RENDERER_TITLE_PREFIX} from './windowTitle.js';
 
 const HOTPLUG_RESTART_DEBOUNCE_MS = 150;
 const NOTIFICATION_COOLDOWN_MS = 10000;
+const DEFAULT_BEAT_CUT_COOLDOWN_SEC = 2.0;
+const VALID_ROTATION_MODES = new Set(['random', 'sequential']);
 
 function _debugIpc() {
     return GLib.getenv('MILKDROP_DEBUG_IPC') === '1';
@@ -189,11 +192,13 @@ class ManagedRendererWindow {
 }
 
 class RendererProcess {
-    constructor({extensionPath, monitor, logger, strictRenderPath = false, onNotify = null}) {
+    constructor({extensionPath, monitor, logger, strictRenderPath = false, textOverlayVisible = true, onNotify = null}) {
         this._extensionPath = extensionPath;
         this._monitor = monitor;
         this._logger = logger;
         this._strictRenderPath = strictRenderPath;
+        this._textOverlayVisible = Boolean(textOverlayVisible);
+        this._pendingTextOverlayVisible = this._textOverlayVisible;
         this._onNotify = onNotify;
         this._waylandClient = null;
         this._stdout = null;
@@ -374,6 +379,12 @@ class RendererProcess {
         } catch (_error) {
         }
         this.subprocess = null;
+        try {
+            if (this._stdout) {
+                this._stdout.close(null);
+            }
+        } catch (_error) {
+        }
         this._stdout = null;
         this._waylandClient = null;
     }
@@ -392,6 +403,7 @@ class RendererProcess {
             this._logger.info?.(`milkdrop [extension] sendFrame ok monitor=${this._monitor.index}`);
 
         this._flushPendingPresetLoad();
+        this._flushPendingTextOverlaySetting();
         this._ipc.send(frameState);
         return true;
     }
@@ -408,6 +420,12 @@ class RendererProcess {
         this._flushPendingPresetLoad();
     }
 
+    setTextOverlayVisible(visible) {
+        this._textOverlayVisible = Boolean(visible);
+        this._pendingTextOverlayVisible = this._textOverlayVisible;
+        this._flushPendingTextOverlaySetting();
+    }
+
     _handleIpcMessage(message) {
         if (this._stopping)
             return;
@@ -416,6 +434,7 @@ class RendererProcess {
         case 'ready':
             this._logger.info?.(`milkdrop renderer IPC ready for monitor ${this._monitor.index}`);
             this._flushPendingPresetLoad();
+            this._flushPendingTextOverlaySetting();
             break;
         case 'helper-ready':
             this._helperReady = message.ok ?? false;
@@ -471,6 +490,18 @@ class RendererProcess {
         return true;
     }
 
+    _flushPendingTextOverlaySetting() {
+        if (this._pendingTextOverlayVisible === null || !this._running || this._stopping || !this.ready)
+            return false;
+
+        this._ipc.send({
+            type: 'set-text-overlay-visible',
+            visible: this._pendingTextOverlayVisible,
+        });
+        this._pendingTextOverlayVisible = null;
+        return true;
+    }
+
     _readOutput() {
         if (!this._stdout || this._stopping)
             return;
@@ -520,6 +551,13 @@ export class MonitorManager {
         this._enabled = false;
         this._disabling = false;
         this._strictRenderPathSupported = this._hasSettingKey('strict-render-path');
+        this._pauseWhenFullscreenSupported = this._hasSettingKey('pause-when-fullscreen');
+        this._presetRotationModeSupported = this._hasSettingKey('preset-rotation-mode');
+        this._beatCutCooldownSupported = this._hasSettingKey('beat-cut-cooldown-sec');
+        this._audioRestartMaxAttemptsSupported = this._hasSettingKey('audio-restart-max-attempts');
+        this._audioReprobeDelaySupported = this._hasSettingKey('audio-reprobe-delay-ms');
+        this._textOverlaySupported = this._hasSettingKey('text-overlay-enabled');
+        this._sequentialRotationCursor = 0;
 
         this._evaluator.loadPreset(this._currentPreset);
     }
@@ -528,7 +566,6 @@ export class MonitorManager {
         this._enabled = true;
         this._disabling = false;
         this._paused = false;
-        this._audioEngine.enable();
 
         this._monitorSignals.push({
             owner: Main.layoutManager,
@@ -544,8 +581,41 @@ export class MonitorManager {
             this._settings.connect('changed::hide-when-maximized', () => this._checkVisibility()),
             this._settings.connect('changed::show-on-empty-desktop-only', () => this._checkVisibility()),
             this._settings.connect('changed::preset-rotation-interval', () => this._startPresetRotation()),
-            this._settings.connect('changed::fps-limit', () => this._startFramePump())
+            this._settings.connect('changed::fps-limit', () => this._startFramePump()),
+            this._settings.connect('changed::preset-directory', () => this._handlePresetDirectoryChanged()),
+            this._settings.connect('changed::audio-source', () => this._handleAudioSettingChanged('audio-source'))
         );
+
+        if (this._pauseWhenFullscreenSupported)
+            this._settingsSignals.push(this._settings.connect('changed::pause-when-fullscreen', () => this._checkVisibility()));
+
+        if (this._presetRotationModeSupported) {
+            this._settingsSignals.push(
+                this._settings.connect('changed::preset-rotation-mode', () => {
+                    this._sequentialRotationCursor = 0;
+                })
+            );
+        }
+
+        if (this._audioRestartMaxAttemptsSupported) {
+            this._settingsSignals.push(
+                this._settings.connect('changed::audio-restart-max-attempts', () =>
+                    this._handleAudioSettingChanged('audio-restart-max-attempts'))
+            );
+        }
+
+        if (this._audioReprobeDelaySupported) {
+            this._settingsSignals.push(
+                this._settings.connect('changed::audio-reprobe-delay-ms', () =>
+                    this._handleAudioSettingChanged('audio-reprobe-delay-ms'))
+            );
+        }
+
+        if (this._textOverlaySupported) {
+            this._settingsSignals.push(
+                this._settings.connect('changed::text-overlay-enabled', () => this._applyTextOverlaySetting())
+            );
+        }
 
         if (this._strictRenderPathSupported) {
             this._settingsSignals.push(
@@ -561,10 +631,18 @@ export class MonitorManager {
                 this._checkVisibility();
         });
 
-        this._spawnForCurrentMonitors();
-        this._startFramePump();
-        this._startPresetRotation();
-        this._checkHelperAvailability();
+        // Defer heavy work so enable() returns immediately and Shell/Extensions stay responsive
+        GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            if (!this._enabled || this._disabling)
+                return GLib.SOURCE_REMOVE;
+            this._audioEngine.enable();
+            this._spawnForCurrentMonitors();
+            this._applyTextOverlaySetting();
+            this._startFramePump();
+            this._startPresetRotation();
+            this._checkHelperAvailability();
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     _checkHelperAvailability() {
@@ -662,11 +740,28 @@ export class MonitorManager {
         if (!this._enabled || this._disabling)
             return;
 
+        const monitors = Main.layoutManager.monitors;
         const enabledMonitors = new Set(this._settings.get_strv('enabled-monitors'));
-        for (const monitor of Main.layoutManager.monitors) {
+        const msg = `[GNOME Milkdrop] _spawnForCurrentMonitors: ${monitors.length} monitor(s), enabledMonitors size=${enabledMonitors.size}`;
+        this._logger.warn?.(msg);
+        GLib.log_structured?.('GNOME Milkdrop', GLib.LogLevelFlags.LEVEL_WARNING, { MESSAGE: msg });
+
+        if (monitors.length === 0) {
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
+                this._spawnForCurrentMonitors();
+                return GLib.SOURCE_REMOVE;
+            });
+            return;
+        }
+
+        for (const monitor of monitors) {
             if (enabledMonitors.size > 0 && !enabledMonitors.has(`${monitor.index}`))
                 continue;
 
+            if (this._rendererProcesses.has(monitor.index))
+                continue;
+
+            this._logger.warn?.(`[GNOME Milkdrop] spawning renderer for monitor index=${monitor.index}`);
             const process = new RendererProcess({
                 extensionPath: this._extensionPath,
                 monitor,
@@ -674,12 +769,19 @@ export class MonitorManager {
                 strictRenderPath: this._strictRenderPathSupported
                     ? this._settings.get_boolean('strict-render-path')
                     : false,
+                textOverlayVisible: this._getBooleanSetting('text-overlay-enabled', true),
                 onNotify: (title, body) => this._notifyUser(title, body),
             });
             process.launch();
             process.queuePresetLoad(this._currentPreset);
             this._rendererProcesses.set(monitor.index, process);
         }
+    }
+
+    _applyTextOverlaySetting() {
+        const visible = this._getBooleanSetting('text-overlay-enabled', true);
+        for (const process of this._rendererProcesses.values())
+            process.setTextOverlayVisible(visible);
     }
 
     _startFramePump() {
@@ -697,6 +799,8 @@ export class MonitorManager {
 
             this._frameCounter += 1;
 
+            const pumpToken = perfBegin('frame-pump');
+
             if (_debugIpc() && this._frameCounter % 60 === 0)
                 this._logger.info?.(`milkdrop [extension] pump tick frame=${this._frameCounter} processes=${this._rendererProcesses.size} paused=${this._paused}`);
 
@@ -709,6 +813,8 @@ export class MonitorManager {
 
             for (const process of this._rendererProcesses.values())
                 process.sendFrame(this._buildFrameState(process.monitorIndex, fpsLimit));
+
+            perfEnd(pumpToken);
 
             return GLib.SOURCE_CONTINUE;
         });
@@ -743,24 +849,73 @@ export class MonitorManager {
             if (index.length <= 1)
                 return;
 
-            // Pick a random preset that isn't the current one
-            const candidates = index.filter(entry => entry.id !== this._currentPreset?.id);
-            if (candidates.length === 0)
+            const nextPresetId = this._selectNextPresetId(index);
+            if (!nextPresetId)
                 return;
 
-            const pick = candidates[Math.floor(Math.random() * candidates.length)];
-            const preset = await this._presetStore.loadPreset(pick.id);
-            this._currentPreset = preset;
-            const blendTime = Math.max(0, this._settings.get_double('blend-time'));
-            this._evaluator.loadPreset(preset, blendTime);
-
-            for (const process of this._rendererProcesses.values())
-                process.queuePresetLoad(preset);
-
-            this._logger.info?.(`milkdrop preset rotated to: ${preset.name}`);
+            const preset = await this._presetStore.loadPreset(nextPresetId);
+            this._applyPreset(preset, 'rotated');
         } catch (error) {
             this._logger.debug?.(`milkdrop preset rotation failed: ${error.message}`);
         }
+    }
+
+    _selectNextPresetId(index) {
+        const mode = this._getPresetRotationMode();
+        if (mode === 'sequential') {
+            let nextIndex = index.findIndex(entry => entry.id === this._currentPreset?.id);
+            if (nextIndex >= 0)
+                nextIndex = (nextIndex + 1) % index.length;
+            else
+                nextIndex = this._sequentialRotationCursor % index.length;
+
+            this._sequentialRotationCursor = (nextIndex + 1) % index.length;
+            return index[nextIndex]?.id ?? null;
+        }
+
+        const candidates = index.filter(entry => entry.id !== this._currentPreset?.id);
+        if (candidates.length === 0)
+            return null;
+
+        const pick = candidates[Math.floor(Math.random() * candidates.length)];
+        return pick.id;
+    }
+
+    _applyPreset(preset, reason = 'updated') {
+        this._currentPreset = preset;
+        const blendTime = Math.max(0, this._settings.get_double('blend-time'));
+        this._evaluator.loadPreset(preset, blendTime);
+
+        for (const process of this._rendererProcesses.values())
+            process.queuePresetLoad(preset);
+
+        this._logger.info?.(`milkdrop preset ${reason}: ${preset.name}`);
+    }
+
+    async _handlePresetDirectoryChanged() {
+        this._presetStore.handleSettingsChanged?.('preset-directory');
+        this._sequentialRotationCursor = 0;
+
+        if (!this._enabled || this._disabling)
+            return;
+
+        if (this._currentPreset?.source !== 'file')
+            return;
+
+        try {
+            const reloaded = await this._presetStore.loadPreset(this._currentPreset.id);
+            this._applyPreset(reloaded, 'reloaded after preset directory change');
+        } catch (_error) {
+            const fallbackPreset = this._presetStore.getBootstrapPreset();
+            this._applyPreset(fallbackPreset, 'reset to bootstrap after preset directory change');
+        }
+    }
+
+    _handleAudioSettingChanged(reason) {
+        if (!this._enabled || this._disabling)
+            return;
+
+        this._audioEngine.handleSettingsChanged(reason);
     }
 
     _checkVisibility() {
@@ -769,12 +924,19 @@ export class MonitorManager {
 
         const hideWhenMaximized = this._settings.get_boolean('hide-when-maximized');
         const emptyDesktopOnly = this._settings.get_boolean('show-on-empty-desktop-only');
+        const pauseWhenFullscreen = this._getBooleanSetting('pause-when-fullscreen', false);
 
         let shouldPause = false;
 
         if (hideWhenMaximized) {
             const focusWindow = global.display.focus_window;
             if (focusWindow && focusWindow.maximized_horizontally && focusWindow.maximized_vertically)
+                shouldPause = true;
+        }
+
+        if (pauseWhenFullscreen && !shouldPause) {
+            const focusWindow = global.display.focus_window;
+            if (focusWindow?.fullscreen)
                 shouldPause = true;
         }
 
@@ -810,7 +972,9 @@ export class MonitorManager {
             audio: this._audioEngine.getFeatures(),
         };
 
+        const evalToken = perfBegin('evaluator');
         const evaluated = this._evaluator.evaluateFrame(baseFrameState);
+        perfEnd(evalToken);
 
         // Guarantee a plain, JSON-serializable audio object so the renderer always receives audio data
         const raw = evaluated.audio ?? this._audioEngine.getFeatures();
@@ -826,10 +990,11 @@ export class MonitorManager {
         };
 
         // Beat-cut: trigger immediate preset rotation on beat if enabled
-        // Cooldown of 2 seconds to avoid rapid switching
+        // Cooldown is configurable for beat-cut behavior.
         if (this._settings.get_boolean('beat-cuts-enabled') && evaluated.audio?.beat) {
             const now = GLib.get_monotonic_time() / 1000000;
-            if (now - this._lastBeatCutTime > 2.0) {
+            const cooldown = Math.max(0, this._getDoubleSetting('beat-cut-cooldown-sec', DEFAULT_BEAT_CUT_COOLDOWN_SEC));
+            if (now - this._lastBeatCutTime > cooldown) {
                 this._lastBeatCutTime = now;
                 this._rotatePreset();
             }
@@ -932,6 +1097,44 @@ export class MonitorManager {
     _clearManagedWindows() {
         for (const window of this._managedWindows.keys())
             this._clearManagedWindow(window);
+    }
+
+    _getPresetRotationMode() {
+        const mode = this._getStringSetting('preset-rotation-mode', 'random');
+        return VALID_ROTATION_MODES.has(mode) ? mode : 'random';
+    }
+
+    _getBooleanSetting(key, fallback) {
+        if (!this._hasSettingKey(key))
+            return fallback;
+
+        try {
+            return this._settings.get_boolean(key);
+        } catch (_error) {
+            return fallback;
+        }
+    }
+
+    _getDoubleSetting(key, fallback) {
+        if (!this._hasSettingKey(key))
+            return fallback;
+
+        try {
+            return this._settings.get_double(key);
+        } catch (_error) {
+            return fallback;
+        }
+    }
+
+    _getStringSetting(key, fallback) {
+        if (!this._hasSettingKey(key))
+            return fallback;
+
+        try {
+            return this._settings.get_string(key);
+        } catch (_error) {
+            return fallback;
+        }
     }
 
     _hasSettingKey(key) {

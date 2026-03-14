@@ -1,7 +1,6 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
-const decoder = new TextDecoder();
 const encoder = new TextEncoder();
 
 function _debugIpc() {
@@ -22,8 +21,6 @@ export class IpcClient {
         this._output = null;
         this._running = false;
         this._closing = false;
-        this._lineBuffer = new Uint8Array(8192);
-        this._lineBufferLength = 0;
         this._writeQueue = [];
         this._writePending = false;
         this.currentFrame = null;
@@ -49,7 +46,9 @@ export class IpcClient {
                         return;
                     }
 
-                    this._input = this._connection.get_input_stream();
+                    this._input = new Gio.DataInputStream({
+                        base_stream: this._connection.get_input_stream(),
+                    });
                     this._output = this._connection.get_output_stream();
                     if (_debugIpc())
                         this._logger.info?.(`milkdrop [renderer] IPC connected socket=${this._socketPath}`);
@@ -72,13 +71,21 @@ export class IpcClient {
         this._writeQueue = [];
         this._writePending = false;
         this._cancellable.cancel();
-        try {
-            this._connection?.close(null);
-        } catch (_error) {
-        }
+        const connection = this._connection;
         this._connection = null;
         this._input = null;
         this._output = null;
+        if (connection) {
+            try {
+                connection.close_async(GLib.PRIORITY_DEFAULT, null, (_stream, result) => {
+                    try {
+                        connection.close_finish(result);
+                    } catch (_error) {
+                    }
+                });
+            } catch (_error) {
+            }
+        }
     }
 
     send(message) {
@@ -117,18 +124,18 @@ export class IpcClient {
         if (!this._running || this._closing || !this._input)
             return;
 
-        this._input.read_bytes_async(4096, GLib.PRIORITY_HIGH, this._cancellable, (stream, result) => {
+        this._input.read_line_async(GLib.PRIORITY_HIGH, this._cancellable, (stream, result) => {
             try {
                 if (!this._running || this._closing || !this._input)
                     return;
 
-                const bytes = stream.read_bytes_finish(result);
-                if (!bytes || bytes.get_size() === 0) {
+                const [line, length] = stream.read_line_finish_utf8(result);
+                if (line === null || length === 0) {
                     this.stop();
                     return;
                 }
 
-                this._onData(bytes.get_data());
+                this._handleLine(line);
                 this._readLoop();
             } catch (error) {
                 if (!error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
@@ -136,42 +143,6 @@ export class IpcClient {
                 this.stop();
             }
         });
-    }
-
-    _onData(data) {
-        if (!this._running || this._closing)
-            return;
-
-        const needed = this._lineBufferLength + data.length;
-        if (needed > this._lineBuffer.length) {
-            const grown = new Uint8Array(needed * 2);
-            grown.set(this._lineBuffer.subarray(0, this._lineBufferLength));
-            this._lineBuffer = grown;
-        }
-
-        this._lineBuffer.set(data, this._lineBufferLength);
-        this._lineBufferLength += data.length;
-
-        let start = 0;
-        for (let index = 0; index < this._lineBufferLength; index += 1) {
-            if (this._lineBuffer[index] === 0x0A) {
-                const line = decoder.decode(this._lineBuffer.subarray(start, index));
-                this._handleLine(line);
-                start = index + 1;
-            }
-        }
-
-        if (start > 0) {
-            this._lineBuffer.copyWithin(0, start, this._lineBufferLength);
-            this._lineBufferLength -= start;
-
-            // Shrink buffer back when usage drops well below allocated size
-            if (this._lineBuffer.length > 16384 && this._lineBufferLength < this._lineBuffer.length / 4) {
-                const shrunk = new Uint8Array(Math.max(8192, this._lineBufferLength * 2));
-                shrunk.set(this._lineBuffer.subarray(0, this._lineBufferLength));
-                this._lineBuffer = shrunk;
-            }
-        }
     }
 
     _handleLine(line) {

@@ -50,9 +50,6 @@ uniform sampler2D uWarpOutput;
 uniform float uTime;
 uniform float uEnergy;
 uniform float uBass;
-uniform float uMid;
-uniform float uHigh;
-uniform float uDecay;
 varying vec2 vTexCoord;
 
 void main() {
