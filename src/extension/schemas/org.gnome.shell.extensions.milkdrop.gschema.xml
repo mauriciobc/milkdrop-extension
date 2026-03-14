@@ -8,7 +8,7 @@
       <description>List of monitor indices that should run a renderer. Empty means all monitors.</description>
     </key>
     <key name="preset-rotation-interval" type="i">
-      <default>0</default>
+      <default>15</default>
       <summary>Preset rotation interval</summary>
       <description>Seconds between automatic preset changes. Zero keeps manual rotation only.</description>
     </key>
@@ -32,6 +32,16 @@
       <summary>Empty desktop only</summary>
       <description>Restrict the renderer to empty-desktop situations once the visibility policy is implemented.</description>
     </key>
+    <key name="text-overlay-enabled" type="b">
+      <default>true</default>
+      <summary>Text overlay enabled</summary>
+      <description>Show or hide the renderer status text overlay over visualizations.</description>
+    </key>
+    <key name="pause-when-fullscreen" type="b">
+      <default>false</default>
+      <summary>Pause when fullscreen</summary>
+      <description>Pause the renderer when the focused window enters fullscreen mode.</description>
+    </key>
     <key name="hide-when-maximized" type="b">
       <default>false</default>
       <summary>Hide when maximized</summary>
@@ -52,6 +62,16 @@
       <summary>Audio source</summary>
       <description>Output monitor source name or auto for automatic output-monitor selection (no microphone fallback).</description>
     </key>
+    <key name="audio-restart-max-attempts" type="i">
+      <default>3</default>
+      <summary>Audio restart max attempts</summary>
+      <description>Maximum audio pipeline restart attempts within a restart window before entering safe fallback mode.</description>
+    </key>
+    <key name="audio-reprobe-delay-ms" type="i">
+      <default>2500</default>
+      <summary>Audio reprobe delay</summary>
+      <description>Delay in milliseconds before retrying monitor-source selection when auto mode is in fallback.</description>
+    </key>
     <key name="eval-backend" type="s">
       <default>'subprocess'</default>
       <summary>Evaluator backend</summary>
@@ -66,6 +86,20 @@
       <default>false</default>
       <summary>Strict render path</summary>
       <description>Disable legacy Base64 frame fallback and require shared-memory frame transport.</description>
+    </key>
+    <key name="preset-rotation-mode" type="s">
+      <default>'random'</default>
+      <summary>Preset rotation mode</summary>
+      <description>Preset rotation strategy. Allowed values are random and sequential.</description>
+      <choices>
+        <choice value='random'/>
+        <choice value='sequential'/>
+      </choices>
+    </key>
+    <key name="beat-cut-cooldown-sec" type="d">
+      <default>2.0</default>
+      <summary>Beat-cut cooldown</summary>
+      <description>Minimum seconds between beat-triggered preset cuts.</description>
     </key>
   </schema>
 </schemalist>

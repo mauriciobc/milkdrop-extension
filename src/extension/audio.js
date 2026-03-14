@@ -5,19 +5,30 @@ const SPECTRUM_THRESHOLD_DB = -80;
 const FEATURE_DECAY = 0.82;
 const FEATURE_SMOOTHING = 0.35;
 const SPECTRUM_BANDS = 24;
-const BEAT_HISTORY_SIZE = 20;
-const BEAT_NOISE_FLOOR = 0.02;
+const SPECTRUM_INTERVAL_NS = 50_000_000;
+const BEAT_HISTORY_MS = 1000;
+const BEAT_COOLDOWN_MS = 100;
+const BEAT_WARMUP_FRAMES = 5;
+// History size and cooldown are derived from SPECTRUM_INTERVAL_NS so wall-clock behaviour is stable if the interval changes.
+// Beat detection operates in linear amplitude space (not dB-normalized) so
+// transients that are significant in real amplitude trigger reliably.
+const BEAT_NOISE_FLOOR = 0.001;
 const BEAT_THRESHOLD_LOW = 1.2;
 const BEAT_THRESHOLD_HIGH = 1.55;
 const BEAT_THRESHOLD_VARIANCE_SLOPE = -15;
-const BEAT_COOLDOWN_FRAMES = 2;
+const SPECTRUM_INTERVAL_MS = SPECTRUM_INTERVAL_NS / 1_000_000;
+const BEAT_HISTORY_SIZE = Math.max(5, Math.ceil(BEAT_HISTORY_MS / SPECTRUM_INTERVAL_MS));
+const BEAT_COOLDOWN_FRAMES = Math.max(1, Math.ceil(BEAT_COOLDOWN_MS / SPECTRUM_INTERVAL_MS));
 const SIGNAL_TIMEOUT_USEC = 750000;
 const DEFAULT_PULSE_MONITOR = '@DEFAULT_MONITOR@';
-const MAX_PIPELINE_RESTARTS = 3;
+const DEFAULT_MAX_PIPELINE_RESTARTS = 3;
 const RESTART_WINDOW_USEC = 15_000_000;
 const RESTART_DELAY_MSEC = 400;
-const SOURCE_REPROBE_DELAY_MSEC = 2500;
+const DEFAULT_SOURCE_REPROBE_DELAY_MSEC = 2500;
+const MIN_SOURCE_REPROBE_DELAY_MSEC = 250;
 const REGEX_FALLBACK_LOG_INTERVAL = 120;
+const PARSER_ERROR_LOG_INTERVAL = 120;
+const MAGNITUDE_REGEX = /magnitude=\((?:float|double)\)\{([^}]*)\}/;
 
 let gstInitialized = false;
 
@@ -33,19 +44,33 @@ function clamp01(value) {
     return Math.max(0, Math.min(1, value));
 }
 
+function normalizedToLinear(n) {
+    if (n <= 0)
+        return 0;
+    return Math.pow(10, (n * Math.abs(SPECTRUM_THRESHOLD_DB) + SPECTRUM_THRESHOLD_DB) / 20);
+}
+
 function average(values) {
     if (!values || values.length === 0)
         return 0;
 
-    return values.reduce((sum, value) => sum + value, 0) / values.length;
+    let sum = 0;
+    for (let i = 0; i < values.length; i++)
+        sum += values[i];
+    return sum / values.length;
 }
 
-function variance(values, mean) {
-    if (!values || values.length === 0)
+function averageRange(values, start, end) {
+    if (!values || values.length === 0 || end <= start)
         return 0;
 
-    const m = mean ?? average(values);
-    return values.reduce((sum, value) => sum + (value - m) ** 2, 0) / values.length;
+    let sum = 0;
+    let count = 0;
+    for (let i = start; i < end; i++) {
+        sum += values[i];
+        count += 1;
+    }
+    return count > 0 ? sum / count : 0;
 }
 
 function normalizeDecibels(value, thresholdDb) {
@@ -68,6 +93,9 @@ export class AudioEngine {
         this._pipeline = null;
         this._bus = null;
         this._busPollId = 0;
+        this._busWatchId = 0;
+        this._busSignalHandlerId = 0;
+        this._busSignalWatchEnabled = false;
         this._restartTimeoutId = 0;
         this._sourceReprobeTimeoutId = 0;
         this._restartAttempts = 0;
@@ -80,11 +108,15 @@ export class AudioEngine {
         this._spectrumParserMode = 'auto';
         this._regexFallbackCount = 0;
         this._fallbackNoticeKey = null;
+        this._parserErrorCount = 0;
+        this._variantErrorCount = 0;
         this._features = this._buildDefaultFeatures('stub', false);
         this._noSpectrumWarnId = 0;
         this._loggedNonSpectrumElement = false;
-        this._energyHistory = [];
-        this._bassHistory = [];
+        this._energyHistory = new Array(BEAT_HISTORY_SIZE).fill(0);
+        this._bassHistory = new Array(BEAT_HISTORY_SIZE).fill(0);
+        this._historyCount = 0;
+        this._historyWriteIndex = 0;
         this._beatCooldown = 0;
     }
 
@@ -105,18 +137,21 @@ export class AudioEngine {
         this._spectrumParserMode = 'auto';
         this._regexFallbackCount = 0;
         this._fallbackNoticeKey = null;
-        this._energyHistory = [];
-        this._bassHistory = [];
-        this._beatCooldown = 0;
+        this._resetBeatHistory();
         this._stopPipeline();
         this._features = this._buildDefaultFeatures(this._features.source, false);
     }
 
     getFeatures() {
-        const sensitivity = Math.max(0.1, this._settings?.get_double?.('audio-sensitivity') ?? 1.0);
+        const sensitivity = Math.max(0.1, this._getDoubleSetting('audio-sensitivity', 1.0));
+        const hasRecentSignal = this._enabled && this._hasRecentSignal();
+        if (!hasRecentSignal && this._historyCount > 0)
+            this._resetBeatHistory();
+
         const features = {
             ...this._features,
-            active: this._enabled && this._hasRecentSignal(),
+            active: hasRecentSignal,
+            beat: hasRecentSignal ? this._features.beat : 0,
         };
 
         return {
@@ -135,7 +170,7 @@ export class AudioEngine {
         this._stopPipeline();
         ensureGstInitialized();
 
-        const configuredSource = this._settings?.get_string?.('audio-source') ?? 'auto';
+        const configuredSource = this._getStringSetting('audio-source', 'auto');
         const sourceName = configuredSource?.trim?.() || 'auto';
         const candidates = this._buildSourceCandidates(configuredSource);
         const autoModeOnlyStub = sourceName === 'auto' && candidates.length === 1 && candidates[0].source === 'stub';
@@ -177,14 +212,15 @@ export class AudioEngine {
                     this._clearSourceReprobe();
                     this._fallbackNoticeKey = null;
                 }
-                this._logger.warn?.('milkdrop audio bus poll started');
-                this._startBusPoll();
+                this._attachBusListener();
                 this._noSpectrumWarnId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 2, () => {
                     this._noSpectrumWarnId = 0;
+                    if (!this._enabled)
+                        return GLib.SOURCE_REMOVE;
                     this._logger.warn?.(
                         `milkdrop audio: 2s check fired enabled=${this._enabled} pipeline=${!!this._pipeline} spectrumCount=${this._spectrumCount}`
                     );
-                    if (this._enabled && this._pipeline && this._spectrumCount === 0)
+                    if (this._pipeline && this._spectrumCount === 0)
                         this._logger.warn?.('milkdrop audio: no spectrum messages received after 2s');
                     return GLib.SOURCE_REMOVE;
                 });
@@ -221,16 +257,95 @@ export class AudioEngine {
         });
     }
 
+    _attachBusListener() {
+        this._detachBusListener();
+        if (!this._bus)
+            return;
+
+        if (typeof this._bus.add_watch === 'function') {
+            try {
+                const watchId = this._bus.add_watch(GLib.PRIORITY_DEFAULT, (bus, message) => {
+                    if (!this._enabled || !this._bus || bus !== this._bus) {
+                        this._busWatchId = 0;
+                        return GLib.SOURCE_REMOVE;
+                    }
+                    this._handleBusMessage(message);
+                    return GLib.SOURCE_CONTINUE;
+                });
+                if (watchId) {
+                    this._busWatchId = watchId;
+                    this._logger.warn?.('milkdrop audio bus watch attached (add_watch)');
+                    return;
+                }
+            } catch (error) {
+                this._logger.warn?.(`milkdrop audio add_watch unavailable: ${error.message}`);
+            }
+        }
+
+        if (typeof this._bus.add_signal_watch === 'function' && typeof this._bus.connect === 'function') {
+            try {
+                this._bus.add_signal_watch();
+                this._busSignalWatchEnabled = true;
+                this._busSignalHandlerId = this._bus.connect('message', (bus, message) => {
+                    if (!this._enabled || !this._bus || bus !== this._bus)
+                        return;
+                    this._handleBusMessage(message);
+                });
+                if (this._busSignalHandlerId) {
+                    this._logger.warn?.('milkdrop audio bus watch attached (signal)');
+                    return;
+                }
+                this._bus.remove_signal_watch?.();
+                this._busSignalWatchEnabled = false;
+            } catch (error) {
+                this._logger.warn?.(`milkdrop audio signal watch unavailable: ${error.message}`);
+                if (this._busSignalWatchEnabled) {
+                    try {
+                        this._bus.remove_signal_watch?.();
+                    } catch (_removeError) {}
+                    this._busSignalWatchEnabled = false;
+                }
+                this._busSignalHandlerId = 0;
+            }
+        }
+
+        this._logger.warn?.('milkdrop audio bus watch unavailable; using polling fallback');
+        this._startBusPoll();
+    }
+
+    _detachBusListener() {
+        if (this._busPollId) {
+            GLib.source_remove(this._busPollId);
+            this._busPollId = 0;
+        }
+
+        if (this._busWatchId) {
+            GLib.source_remove(this._busWatchId);
+            this._busWatchId = 0;
+        }
+
+        if (this._bus && this._busSignalHandlerId) {
+            try {
+                this._bus.disconnect(this._busSignalHandlerId);
+            } catch (_error) {}
+        }
+        this._busSignalHandlerId = 0;
+
+        if (this._bus && this._busSignalWatchEnabled) {
+            try {
+                this._bus.remove_signal_watch?.();
+            } catch (_error) {}
+        }
+        this._busSignalWatchEnabled = false;
+    }
+
     _stopPipeline() {
         if (this._noSpectrumWarnId) {
             GLib.source_remove(this._noSpectrumWarnId);
             this._noSpectrumWarnId = 0;
             this._logger.warn?.('milkdrop audio: 2s spectrum timeout cancelled (pipeline stopping)');
         }
-        if (this._busPollId) {
-            GLib.source_remove(this._busPollId);
-            this._busPollId = 0;
-        }
+        this._detachBusListener();
 
         if (this._restartTimeoutId) {
             GLib.source_remove(this._restartTimeoutId);
@@ -245,10 +360,11 @@ export class AudioEngine {
         this._pipeline = null;
         this._bus = null;
         this._lastUpdateUsec = 0;
+        this._resetBeatHistory();
     }
 
     _buildPipelineDescription(sourceElement) {
-        return `${sourceElement} ! queue leaky=downstream max-size-buffers=2 ! audioconvert ! audioresample ! spectrum bands=${SPECTRUM_BANDS} threshold=${SPECTRUM_THRESHOLD_DB} post-messages=true interval=50000000 ! fakesink sync=false`;
+        return `${sourceElement} ! queue leaky=downstream max-size-buffers=2 ! audioconvert ! audioresample ! spectrum bands=${SPECTRUM_BANDS} threshold=${SPECTRUM_THRESHOLD_DB} post-messages=true interval=${SPECTRUM_INTERVAL_NS} ! fakesink sync=false`;
     }
 
     _getSourceBackendAvailability() {
@@ -338,11 +454,14 @@ export class AudioEngine {
             break;
         }
         case Gst.MessageType.ERROR: {
-            const [error] = message.parse_error();
-            this._logger.warn?.(`milkdrop audio bus error: ${error.message}`);
+            const [error, debug] = message.parse_error();
+            const errorMessage = error?.message ?? 'unknown error';
+            const debugMessage = debug ? ` debug=${debug}` : '';
+            this._logger.warn?.(`milkdrop audio bus error: ${errorMessage}${debugMessage}`);
+            this._resetBeatHistory();
             this._features = this._buildDefaultFeatures(this._resolveActiveSourceName(), false);
             this._lastUpdateUsec = 0;
-            this._schedulePipelineRestart(error.message);
+            this._schedulePipelineRestart(debug ? `${errorMessage} (${debug})` : errorMessage);
             break;
         }
         case Gst.MessageType.STATE_CHANGED: {
@@ -358,6 +477,9 @@ export class AudioEngine {
     }
 
     _handleSpectrumMessage(message) {
+        if (!this._enabled)
+            return;
+
         const structure = message.get_structure();
         if (!structure || structure.get_name() !== 'spectrum')
             return;
@@ -371,44 +493,69 @@ export class AudioEngine {
             return;
         }
 
+        const nowUsec = GLib.get_monotonic_time();
+        if (this._lastUpdateUsec && nowUsec - this._lastUpdateUsec >= SIGNAL_TIMEOUT_USEC)
+            this._resetBeatHistory();
+
         const third = Math.max(1, Math.floor(bands.length / 3));
-        const bass = average(bands.slice(0, third));
-        const mid = average(bands.slice(third, third * 2));
-        const high = average(bands.slice(third * 2));
+        const midStart = third;
+        const highStart = third * 2;
+        const bass = averageRange(bands, 0, midStart);
+        const mid = averageRange(bands, midStart, highStart);
+        const high = averageRange(bands, highStart, bands.length);
         const energy = average(bands);
 
-        this._energyHistory.push(energy);
-        this._bassHistory.push(bass);
-        if (this._energyHistory.length > BEAT_HISTORY_SIZE) {
-            this._energyHistory.shift();
-            this._bassHistory.shift();
-        }
+        // Convert to linear amplitude for beat detection — dB normalization
+        // compresses dynamic range so much that real transients (which are
+        // large in amplitude) appear as tiny variations in [0,1] space.
+        const beatEnergy = normalizedToLinear(energy);
+        const beatBass = normalizedToLinear(bass);
+        this._appendBeatHistory(beatEnergy, beatBass);
 
         let beat = 0;
+        let beatDebug = null;
+        const beatDebugEnabled = GLib.getenv('MILKDROP_DEBUG_BEAT') === '1';
         if (this._beatCooldown > 0) {
             this._beatCooldown -= 1;
-        } else if (this._energyHistory.length >= 5) {
-            const avgE = average(this._energyHistory);
-            const avgB = average(this._bassHistory);
-            const varE = variance(this._energyHistory, avgE);
-            const varB = variance(this._bassHistory, avgB);
-            const threshE = Math.max(BEAT_THRESHOLD_LOW, Math.min(BEAT_THRESHOLD_HIGH, BEAT_THRESHOLD_VARIANCE_SLOPE * varE + BEAT_THRESHOLD_HIGH));
-            const threshB = Math.max(BEAT_THRESHOLD_LOW, Math.min(BEAT_THRESHOLD_HIGH, BEAT_THRESHOLD_VARIANCE_SLOPE * varB + BEAT_THRESHOLD_HIGH));
-            const energyBeat = (energy - BEAT_NOISE_FLOOR) > threshE * avgE && avgE > BEAT_NOISE_FLOOR;
-            const bassBeat = (bass - BEAT_NOISE_FLOOR) > threshB * avgB && avgB > BEAT_NOISE_FLOOR;
+        } else if (this._historyCount >= BEAT_WARMUP_FRAMES) {
+            const avgE = this._averageHistory(this._energyHistory);
+            const avgB = this._averageHistory(this._bassHistory);
+            const varE = this._varianceHistory(this._energyHistory, avgE);
+            const varB = this._varianceHistory(this._bassHistory, avgB);
+            // Use coefficient of variation (variance / mean²) so the adaptive
+            // threshold responds to *relative* dynamics, not absolute scale.
+            const cvSqE = avgE > 0 ? varE / (avgE * avgE) : 0;
+            const cvSqB = avgB > 0 ? varB / (avgB * avgB) : 0;
+            const threshE = Math.max(BEAT_THRESHOLD_LOW, Math.min(BEAT_THRESHOLD_HIGH, BEAT_THRESHOLD_VARIANCE_SLOPE * cvSqE + BEAT_THRESHOLD_HIGH));
+            const threshB = Math.max(BEAT_THRESHOLD_LOW, Math.min(BEAT_THRESHOLD_HIGH, BEAT_THRESHOLD_VARIANCE_SLOPE * cvSqB + BEAT_THRESHOLD_HIGH));
+            const needE = threshE * avgE;
+            const needB = threshB * avgB;
+            const energyBeat = (beatEnergy - BEAT_NOISE_FLOOR) > needE && avgE > BEAT_NOISE_FLOOR;
+            const bassBeat = (beatBass - BEAT_NOISE_FLOOR) > needB && avgB > BEAT_NOISE_FLOOR;
             if (energyBeat || bassBeat) {
                 beat = 1;
                 this._beatCooldown = BEAT_COOLDOWN_FRAMES;
             }
+            if (beatDebugEnabled)
+                beatDebug = { beatEnergy, beatBass, avgE, avgB, varE, varB, cvSqE, cvSqB, threshE, threshB, needE, needB, energyBeat, bassBeat, beat };
         }
 
         const decay = Math.max(energy, this._features.decay * FEATURE_DECAY);
 
         this._spectrumCount += 1;
-        const nowUsec = GLib.get_monotonic_time();
 
+        if (beatDebug && beatDebugEnabled) {
+            const d = beatDebug;
+            const show = d.beat === 1 || this._spectrumCount % 20 === 0;
+            if (show)
+                this._logger.warn?.(
+                    `milkdrop beat #${this._spectrumCount} beat=${d.beat} linE=${d.beatEnergy.toFixed(6)} linB=${d.beatBass.toFixed(6)} avgE=${d.avgE.toFixed(6)} avgB=${d.avgB.toFixed(6)} cvE=${d.cvSqE.toFixed(4)} cvB=${d.cvSqB.toFixed(4)} threshE=${d.threshE.toFixed(3)} threshB=${d.threshB.toFixed(3)} needE=${d.needE.toFixed(6)} needB=${d.needB.toFixed(6)} E_beat=${d.energyBeat} B_beat=${d.bassBeat}`
+                );
+        }
+
+        const sourceName = this._resolveActiveSourceName();
         if (this._spectrumCount === 1) {
-            this._logger.warn?.(`milkdrop audio first spectrum received source=${this._resolveActiveSourceName()} bands=${bands.length}`);
+            this._logger.warn?.(`milkdrop audio first spectrum received source=${sourceName} bands=${bands.length}`);
             const rawStruct = structure?.to_string?.() ?? '';
             this._logger.warn?.(`milkdrop audio first spectrum raw (first 300 chars): ${rawStruct.slice(0, 300)}`);
         }
@@ -421,16 +568,18 @@ export class AudioEngine {
             );
         }
 
-        this._features = {
-            source: this._resolveActiveSourceName(),
-            active: true,
-            energy: this._smooth(this._features.energy, energy),
-            bass: this._smooth(this._features.bass, bass),
-            mid: this._smooth(this._features.mid, mid),
-            high: this._smooth(this._features.high, high),
-            beat,
-            decay,
-        };
+        const prevEnergy = this._features.energy;
+        const prevBass = this._features.bass;
+        const prevMid = this._features.mid;
+        const prevHigh = this._features.high;
+        this._features.source = sourceName;
+        this._features.active = true;
+        this._features.energy = this._smooth(prevEnergy, energy);
+        this._features.bass = this._smooth(prevBass, bass);
+        this._features.mid = this._smooth(prevMid, mid);
+        this._features.high = this._smooth(prevHigh, high);
+        this._features.beat = beat;
+        this._features.decay = decay;
         this._lastUpdateUsec = nowUsec;
 
         if (this._spectrumCount % 50 === 0) {
@@ -491,14 +640,23 @@ export class AudioEngine {
     }
 
     _parseSpectrumBandsFromString(structureString) {
-        const match = structureString.match(/magnitude=\((?:float|double)\)\{([^}]*)\}/);
+        const match = MAGNITUDE_REGEX.exec(structureString);
         if (!match)
             return [];
 
-        return match[1]
-            .split(',')
-            .map(part => normalizeDecibels(Number.parseFloat(part.trim()), SPECTRUM_THRESHOLD_DB))
-            .filter(value => Number.isFinite(value));
+        const values = [];
+        const payload = match[1];
+        let start = 0;
+        for (let i = 0; i <= payload.length; i++) {
+            if (i !== payload.length && payload[i] !== ',')
+                continue;
+            const parsed = Number.parseFloat(payload.slice(start, i));
+            const normalized = normalizeDecibels(parsed, SPECTRUM_THRESHOLD_DB);
+            if (Number.isFinite(normalized))
+                values.push(normalized);
+            start = i + 1;
+        }
+        return values;
     }
 
     _recordRegexFallbackUse(hadBands) {
@@ -519,20 +677,17 @@ export class AudioEngine {
                 const arr = structure.get_array('magnitude');
                 if (!arr || arr.length === 0)
                     return null;
-                const firstVals = this._extractFloatsFromVariant(arr[0]);
-                const isMultiChannel = arr.length > 1 && firstVals.length > 1;
-                if (isMultiChannel) {
-                    const channelBands = [firstVals];
-                    for (let c = 1; c < arr.length; c++) {
-                        const vals = this._extractFloatsFromVariant(arr[c]);
-                        if (vals.length > 0)
-                            channelBands.push(vals);
-                    }
+                const channelBands = Array.from(arr)
+                    .map(value => this._extractFloatsFromVariant(value))
+                    .filter(values => values.length > 0);
+                if (channelBands.length === 0)
+                    return null;
+                const isMultiChannel = channelBands.length > 1 && channelBands.some(values => values.length > 1);
+                if (isMultiChannel)
                     return this._mergeChannelBands(channelBands);
-                }
-                if (firstVals.length > 0)
-                    return firstVals.map(v => normalizeDecibels(v, SPECTRUM_THRESHOLD_DB));
-                return Array.from(arr).map(v => normalizeDecibels(Number(v), SPECTRUM_THRESHOLD_DB)).filter(Number.isFinite);
+                if (channelBands.length > 1)
+                    return channelBands.map(values => normalizeDecibels(values[0], SPECTRUM_THRESHOLD_DB)).filter(Number.isFinite);
+                return channelBands[0].map(v => normalizeDecibels(v, SPECTRUM_THRESHOLD_DB)).filter(Number.isFinite);
             }
             const value = structure.get_value?.('magnitude');
             if (value && typeof value.n_children === 'function') {
@@ -550,7 +705,11 @@ export class AudioEngine {
                     return null;
                 return this._mergeChannelBands(channelBands);
             }
-        } catch (_e) {}
+        } catch (error) {
+            this._parserErrorCount += 1;
+            if (this._parserErrorCount === 1 || this._parserErrorCount % PARSER_ERROR_LOG_INTERVAL === 0)
+                this._logger.debug?.(`milkdrop audio structured parser error #${this._parserErrorCount}: ${error.message}`);
+        }
         return null;
     }
 
@@ -575,7 +734,11 @@ export class AudioEngine {
             const v = Number(variant?.get_double?.() ?? variant);
             if (Number.isFinite(v))
                 out.push(v);
-        } catch (_) {}
+        } catch (error) {
+            this._variantErrorCount += 1;
+            if (this._variantErrorCount === 1 || this._variantErrorCount % PARSER_ERROR_LOG_INTERVAL === 0)
+                this._logger.debug?.(`milkdrop audio variant parser error #${this._variantErrorCount}: ${error.message}`);
+        }
         return out;
     }
 
@@ -602,10 +765,45 @@ export class AudioEngine {
         return this._activeSourceName || 'stub';
     }
 
+    _appendBeatHistory(energy, bass) {
+        this._energyHistory[this._historyWriteIndex] = energy;
+        this._bassHistory[this._historyWriteIndex] = bass;
+        this._historyWriteIndex = (this._historyWriteIndex + 1) % BEAT_HISTORY_SIZE;
+        this._historyCount = Math.min(this._historyCount + 1, BEAT_HISTORY_SIZE);
+    }
+
+    _averageHistory(history) {
+        if (this._historyCount === 0)
+            return 0;
+
+        let sum = 0;
+        for (let i = 0; i < this._historyCount; i++)
+            sum += history[i];
+        return sum / this._historyCount;
+    }
+
+    _varianceHistory(history, mean) {
+        if (this._historyCount === 0)
+            return 0;
+
+        let sum = 0;
+        for (let i = 0; i < this._historyCount; i++) {
+            const delta = history[i] - mean;
+            sum += delta * delta;
+        }
+        return sum / this._historyCount;
+    }
+
     _schedulePipelineRestart(reason) {
         if (!this._enabled)
             return;
 
+        const restartBudget = this._getIntSetting(
+            'audio-restart-max-attempts',
+            DEFAULT_MAX_PIPELINE_RESTARTS,
+            0,
+            100
+        );
         const nowUsec = GLib.get_monotonic_time();
         if (!this._restartWindowStartUsec || nowUsec - this._restartWindowStartUsec > RESTART_WINDOW_USEC) {
             this._restartWindowStartUsec = nowUsec;
@@ -613,7 +811,7 @@ export class AudioEngine {
         }
 
         this._restartAttempts += 1;
-        if (this._restartAttempts > MAX_PIPELINE_RESTARTS) {
+        if (this._restartAttempts > restartBudget) {
             this._logger.warn?.('milkdrop audio restart budget exhausted; entering monitor reprobe mode');
             this._stopPipeline();
             this._activeSourceName = 'stub';
@@ -673,6 +871,18 @@ export class AudioEngine {
         };
     }
 
+    _resetBeatHistory() {
+        this._energyHistory = new Array(BEAT_HISTORY_SIZE).fill(0);
+        this._bassHistory = new Array(BEAT_HISTORY_SIZE).fill(0);
+        this._historyCount = 0;
+        this._historyWriteIndex = 0;
+        this._beatCooldown = 0;
+        this._features = {
+            ...this._features,
+            beat: 0,
+        };
+    }
+
     _clearSourceReprobe() {
         if (!this._sourceReprobeTimeoutId)
             return;
@@ -685,7 +895,14 @@ export class AudioEngine {
         if (!this._enabled || !this._shouldAutoReprobe() || this._sourceReprobeTimeoutId)
             return;
 
-        this._sourceReprobeTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, SOURCE_REPROBE_DELAY_MSEC, () => {
+        const reprobeDelay = this._getIntSetting(
+            'audio-reprobe-delay-ms',
+            DEFAULT_SOURCE_REPROBE_DELAY_MSEC,
+            MIN_SOURCE_REPROBE_DELAY_MSEC,
+            120000
+        );
+
+        this._sourceReprobeTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, reprobeDelay, () => {
             this._sourceReprobeTimeoutId = 0;
 
             if (!this._enabled)
@@ -701,8 +918,68 @@ export class AudioEngine {
     }
 
     _shouldAutoReprobe() {
-        const configuredSource = this._settings?.get_string?.('audio-source') ?? 'auto';
+        const configuredSource = this._getStringSetting('audio-source', 'auto');
         return (configuredSource?.trim?.() || 'auto') === 'auto';
+    }
+
+    handleSettingsChanged(reason = 'settings-changed') {
+        if (!this._enabled)
+            return;
+
+        this._logger.info?.(`milkdrop audio applying settings change: ${reason}`);
+        this._restartAttempts = 0;
+        this._restartWindowStartUsec = 0;
+        this._stopPipeline();
+        this._startPipeline();
+    }
+
+    _getIntSetting(key, fallback, min = null, max = null) {
+        if (!this._hasSettingKey(key))
+            return fallback;
+
+        try {
+            let value = this._settings.get_int(key);
+            if (min !== null)
+                value = Math.max(min, value);
+            if (max !== null)
+                value = Math.min(max, value);
+            return value;
+        } catch (_error) {
+            return fallback;
+        }
+    }
+
+    _getDoubleSetting(key, fallback) {
+        if (!this._hasSettingKey(key))
+            return fallback;
+
+        try {
+            return this._settings.get_double(key);
+        } catch (_error) {
+            return fallback;
+        }
+    }
+
+    _getStringSetting(key, fallback) {
+        if (!this._hasSettingKey(key))
+            return fallback;
+
+        try {
+            return this._settings.get_string(key);
+        } catch (_error) {
+            return fallback;
+        }
+    }
+
+    _hasSettingKey(key) {
+        try {
+            const schema = this._settings?.settings_schema ?? this._settings?.get_settings_schema?.();
+            if (schema?.has_key)
+                return Boolean(schema.has_key(key));
+            return Boolean(this._settings);
+        } catch (_error) {
+            return false;
+        }
     }
 
     _notifyFallbackOnce(key, title, body) {

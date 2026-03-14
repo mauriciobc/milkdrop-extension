@@ -12,16 +12,11 @@ const HELPER_STREAM_MAX_DIMENSION = 192;
 const FALLBACK_STRIPE_COUNT = 12;
 const FALLBACK_ORB_MIN_SIZE = 28;
 const FALLBACK_ORB_SIZE_FACTOR = 0.08;
-const MIN_GL_VERSION_MAJOR = 3;
-const MIN_GL_VERSION_MINOR = 3;
 
 export const MilkdropGLArea = GObject.registerClass(
-class MilkdropGLArea extends Gtk.GLArea {
+class MilkdropGLArea extends Gtk.Widget {
     constructor({standalone = false, strictRenderPath = false, logger = console, onBridgeMessage = null} = {}) {
         super({
-            auto_render: true,
-            has_depth_buffer: false,
-            has_stencil_buffer: false,
             hexpand: true,
             vexpand: true,
         });
@@ -37,39 +32,30 @@ class MilkdropGLArea extends Gtk.GLArea {
         this._helperFrame = null;
         this._helperTexture = null;
         this._helperTextureSerial = 0;
-        this._meshUploaded = false;
+        this._invalidHelperFrameSerial = 0;
         this._baseMesh = createDefaultMesh();
         this._vertexEval = new VertexEvaluator();
         this._useShaderWarp = false;
         this._warpParams = null;
+        this._scratchRect = new Graphene.Rect();
+        this._scratchColor = new Gdk.RGBA();
         this._glBridge = new GlBridge({
             strictRenderPath,
             logger: this._logger,
             onMessage: message => this._handleBridgeMessage(message),
         });
-        this.set_required_version(MIN_GL_VERSION_MAJOR, MIN_GL_VERSION_MINOR);
 
         this.connect('realize', () => {
             try {
-                this.make_current();
-                if (this.get_error())
-                    this._logger.warn?.(`milkdrop glarea current context error: ${this.get_error().message}`);
                 this._startBridge();
             } catch (error) {
                 this._logger.warn?.(`milkdrop glarea realize failed: ${error.message}`);
             }
         });
 
-        this.connect('render', () => this._render());
         this.connect('unrealize', () => this._stopRendering());
         this.connect('destroy', () => this._stopRendering());
-        this._tickCallbackId = this.add_tick_callback(() => {
-            if (!this._running)
-                return GLib.SOURCE_REMOVE;
-
-            this.queue_render();
-            return GLib.SOURCE_CONTINUE;
-        });
+        this._ensureFallbackTick();
 
         if (this._standalone)
             this.set_tooltip_text('Milkdrop GLArea visual proof');
@@ -86,7 +72,8 @@ class MilkdropGLArea extends Gtk.GLArea {
             Object.assign(payload, this._warpParams);
         }
         this._glBridge.submitFrame(payload);
-        this.queue_render();
+        if (!this._helperReady)
+            this.queue_draw();
     }
 
     loadPresetVertex(vertexSpec) {
@@ -143,10 +130,7 @@ class MilkdropGLArea extends Gtk.GLArea {
         this._helperTexture = null;
         this._helperTextureSerial = 0;
         this._glBridge.stop();
-        if (this._tickCallbackId) {
-            this.remove_tick_callback(this._tickCallbackId);
-            this._tickCallbackId = 0;
-        }
+        this._disableFallbackTick();
     }
 
     _startBridge() {
@@ -161,24 +145,28 @@ class MilkdropGLArea extends Gtk.GLArea {
         });
     }
 
-    _render() {
-        try {
-            this.make_current();
-            if (this.get_error()) {
-                this._logger.warn?.(`milkdrop glarea render context error: ${this.get_error().message}`);
-                return false;
-            }
-        } catch (error) {
-            this._logger.warn?.(`milkdrop glarea render failed: ${error.message}`);
-            return false;
-        }
+    _ensureFallbackTick() {
+        if (this._tickCallbackId || !this._running)
+            return;
 
-        return true;
+        this._tickCallbackId = this.add_tick_callback(() => {
+            if (!this._running)
+                return GLib.SOURCE_REMOVE;
+
+            this.queue_draw();
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
+    _disableFallbackTick() {
+        if (!this._tickCallbackId)
+            return;
+
+        this.remove_tick_callback(this._tickCallbackId);
+        this._tickCallbackId = 0;
     }
 
     vfunc_snapshot(snapshot) {
-        super.vfunc_snapshot(snapshot);
-
         const width = this.get_width();
         const height = this.get_height();
         if (width <= 0 || height <= 0)
@@ -200,8 +188,7 @@ class MilkdropGLArea extends Gtk.GLArea {
         const baseGreen = this._wave(time * 0.23 + zoom * 1.9);
         const baseBlue = this._wave(time * 0.41 + frame * 0.015);
 
-        this._appendRect(snapshot,
-            this._rgba(baseRed * 0.22, baseGreen * 0.2, baseBlue * 0.32, 1.0),
+        this._appendRect(snapshot, baseRed * 0.22, baseGreen * 0.2, baseBlue * 0.32, 1.0,
             0, 0, width, height);
 
         const stripeCount = FALLBACK_STRIPE_COUNT;
@@ -212,12 +199,10 @@ class MilkdropGLArea extends Gtk.GLArea {
             const x = index * stripeWidth;
             const y = height - stripeHeight;
             this._appendRect(snapshot,
-                this._rgba(
-                    0.12 + intensity * 0.35,
-                    0.24 + baseGreen * 0.45,
-                    0.45 + baseBlue * 0.4,
-                    0.78
-                ),
+                0.12 + intensity * 0.35,
+                0.24 + baseGreen * 0.45,
+                0.45 + baseBlue * 0.4,
+                0.78,
                 x,
                 y,
                 Math.max(1, stripeWidth - 3),
@@ -230,28 +215,13 @@ class MilkdropGLArea extends Gtk.GLArea {
             FALLBACK_ORB_MIN_SIZE,
             Math.min(width, height) * (FALLBACK_ORB_SIZE_FACTOR + Math.abs(rotation) * 6.0)
         );
-        this._appendRect(snapshot,
-            this._rgba(0.92, 0.96, 1.0, 0.92),
-            orbX - orbSize / 2,
-            orbY - orbSize / 2,
-            orbSize,
-            orbSize);
+        this._appendRect(snapshot, 0.92, 0.96, 1.0, 0.92, orbX - orbSize / 2, orbY - orbSize / 2, orbSize, orbSize);
 
         const zoomBarWidth = Math.max(24, Math.min(width * 0.72, width * (0.28 + (zoom - 1.0) * 10.0)));
-        this._appendRect(snapshot,
-            this._rgba(0.98, 0.78, 0.22, 0.9),
-            18,
-            18,
-            zoomBarWidth,
-            10);
+        this._appendRect(snapshot, 0.98, 0.78, 0.22, 0.9, 18, 18, zoomBarWidth, 10);
 
         const rotBarWidth = Math.max(18, width * (0.08 + Math.min(0.42, Math.abs(rotation) * 35.0)));
-        this._appendRect(snapshot,
-            this._rgba(0.32, 0.95, 0.74, 0.86),
-            18,
-            36,
-            rotBarWidth,
-            8);
+        this._appendRect(snapshot, 0.32, 0.95, 0.74, 0.86, 18, 36, rotBarWidth, 8);
     }
 
     _buildFallbackFrameState() {
@@ -285,42 +255,56 @@ class MilkdropGLArea extends Gtk.GLArea {
         if (this._helperTexture && this._helperTextureSerial === this._helperFrame.serial)
             return this._helperTexture;
 
+        const width = this._helperFrame.width ?? 0;
+        const height = this._helperFrame.height ?? 0;
+        const stride = this._helperFrame.stride ?? 0;
+        const expectedSize = stride * height;
+        const actualSize = typeof this._helperFrame.bytes?.get_size === 'function'
+            ? this._helperFrame.bytes.get_size()
+            : -1;
+        if (width <= 0 || height <= 0 || stride < width * 4 || expectedSize <= 0 || actualSize !== expectedSize) {
+            if (this._helperFrame.serial !== this._invalidHelperFrameSerial) {
+                this._invalidHelperFrameSerial = this._helperFrame.serial;
+                this._logger.warn?.(
+                    `milkdrop glarea dropping invalid helper frame serial=${this._helperFrame.serial} `
+                    + `width=${width} height=${height} stride=${stride} expected=${expectedSize} got=${actualSize}`
+                );
+            }
+            this._helperFrame = null;
+            this._helperTexture = null;
+            this._helperTextureSerial = 0;
+            return null;
+        }
+
         this._helperTexture = Gdk.MemoryTexture.new(
-            this._helperFrame.width,
-            this._helperFrame.height,
+            width,
+            height,
             Gdk.MemoryFormat.R8G8B8A8,
-            GLib.Bytes.new(this._helperFrame.bytes),
-            this._helperFrame.stride
+            this._helperFrame.bytes,
+            stride
         );
         this._helperTextureSerial = this._helperFrame.serial;
         return this._helperTexture;
     }
 
-    _appendRect(snapshot, color, x, y, width, height) {
+    _appendRect(snapshot, red, green, blue, alpha, x, y, width, height) {
         if (width <= 0 || height <= 0)
             return;
 
-        const rect = new Graphene.Rect();
-        rect.init(x, y, width, height);
-        snapshot.append_color(color, rect);
+        this._scratchColor.red = this._clamp(red);
+        this._scratchColor.green = this._clamp(green);
+        this._scratchColor.blue = this._clamp(blue);
+        this._scratchColor.alpha = this._clamp(alpha);
+        this._scratchRect.init(x, y, width, height);
+        snapshot.append_color(this._scratchColor, this._scratchRect);
     }
 
     _appendTexture(snapshot, texture, x, y, width, height) {
         if (!texture || width <= 0 || height <= 0)
             return;
 
-        const rect = new Graphene.Rect();
-        rect.init(x, y, width, height);
-        snapshot.append_texture(texture, rect);
-    }
-
-    _rgba(red, green, blue, alpha) {
-        return new Gdk.RGBA({
-            red: this._clamp(red),
-            green: this._clamp(green),
-            blue: this._clamp(blue),
-            alpha: this._clamp(alpha),
-        });
+        this._scratchRect.init(x, y, width, height);
+        snapshot.append_texture(texture, this._scratchRect);
     }
 
     _wave(value) {
@@ -336,7 +320,18 @@ class MilkdropGLArea extends Gtk.GLArea {
         case 'helper-ready':
             this._helperReady = message.ok ?? false;
             if (this._helperReady)
-                this._uploadPresetMesh();
+                this._disableFallbackTick();
+            else
+                this._ensureFallbackTick();
+            if (this._helperReady) {
+                if (this._useShaderWarp) {
+                    const mesh = createDefaultMesh(this._baseMesh.columns, this._baseMesh.rows);
+                    applyWarpToMesh(mesh.vertices, mesh.vertexCount, {}, (u, v) => [u, v]);
+                    this._glBridge.uploadMesh(mesh);
+                } else {
+                    this._uploadPresetMesh();
+                }
+            }
             if (!this._helperReady) {
                 this._helperFrame = null;
                 this._helperTexture = null;
@@ -351,6 +346,7 @@ class MilkdropGLArea extends Gtk.GLArea {
         case 'shader_error':
         case 'helper-crashed':
             this._helperReady = false;
+            this._ensureFallbackTick();
             this._helperFrame = null;
             this._helperTexture = null;
             this._helperTextureSerial = 0;
