@@ -48,6 +48,8 @@ export default class MilkdropPreferences extends ExtensionPreferences {
 
         addSwitchRow(displayGroup, settings, 'hide-when-maximized', _('Hide when maximized'), _('Pause visual presence when a window is maximized.'));
         addSwitchRow(displayGroup, settings, 'show-on-empty-desktop-only', _('Empty desktop only'), _('Restrict the renderer to empty-desktop scenarios later in development.'));
+        addSwitchRow(displayGroup, settings, 'text-overlay-enabled', _('Text overlay'), _('Show or hide status text drawn over visualizations.'));
+        addSwitchRow(displayGroup, settings, 'pause-when-fullscreen', _('Pause when fullscreen'), _('Immediately pause rendering while the focused window is fullscreen.'));
         addSpinRow(displayGroup, settings, 'fps-limit', _('FPS limit'), _('Current placeholder frame cap.'), new Gtk.Adjustment({lower: 30, upper: 240, step_increment: 1, page_increment: 10, value: 60}));
 
         const audioPage = new Adw.PreferencesPage({
@@ -64,6 +66,8 @@ export default class MilkdropPreferences extends ExtensionPreferences {
 
         addSpinRow(audioGroup, settings, 'audio-sensitivity', _('Audio sensitivity'), _('Multiplier applied once the spectrum pipeline is active.'), new Gtk.Adjustment({lower: 0.1, upper: 3.0, step_increment: 0.1, page_increment: 0.5, value: 1.0}));
         addEntryRow(audioGroup, settings, 'audio-source', _('Audio source'), _('Output monitor source name (for example alsa_output...monitor) or auto (never microphone fallback).'));
+        addSpinRow(audioGroup, settings, 'audio-restart-max-attempts', _('Audio restart max attempts'), _('Applies after audio pipeline restart/reprobe.'), new Gtk.Adjustment({lower: 0, upper: 100, step_increment: 1, page_increment: 5, value: 3}));
+        addSpinRow(audioGroup, settings, 'audio-reprobe-delay-ms', _('Audio reprobe delay (ms)'), _('Applies after audio pipeline restart/reprobe.'), new Gtk.Adjustment({lower: 250, upper: 120000, step_increment: 50, page_increment: 500, value: 2500}));
         addEntryRow(audioGroup, settings, 'eval-backend', _('Evaluator backend'), _('Current values: subprocess, gi, or js.'));
 
         const advancedPage = new Adw.PreferencesPage({
@@ -87,6 +91,9 @@ export default class MilkdropPreferences extends ExtensionPreferences {
         addSwitchRow(advancedGroup, settings, 'debug-renderer', _('Debug renderer'), _('Enable verbose renderer logging during development.'));
         addSwitchRow(advancedGroup, settings, 'strict-render-path', _('Strict render path'), _('Disable legacy Base64 frame fallback and require shared-memory frame transport.'));
         addSpinRow(advancedGroup, settings, 'preset-rotation-interval', _('Preset rotation interval'), _('Seconds between automatic preset changes.'), new Gtk.Adjustment({lower: 0, upper: 600, step_increment: 1, page_increment: 10, value: 0}));
+        addEntryRow(advancedGroup, settings, 'preset-rotation-mode', _('Preset rotation mode'), _('Use random or sequential. Applies on the next rotation tick.'));
+        addSwitchRow(advancedGroup, settings, 'beat-cuts-enabled', _('Beat cuts enabled'), _('Allow beat events to trigger preset changes.'));
+        addSpinRow(advancedGroup, settings, 'beat-cut-cooldown-sec', _('Beat-cut cooldown (sec)'), _('Minimum seconds between beat-triggered preset cuts (applies immediately).'), new Gtk.Adjustment({lower: 0.0, upper: 30.0, step_increment: 0.1, page_increment: 0.5, value: 2.0}));
         addSpinRow(advancedGroup, settings, 'blend-time', _('Blend time'), _('Seconds used for preset blending.'), new Gtk.Adjustment({lower: 0.0, upper: 10.0, step_increment: 0.1, page_increment: 0.5, value: 2.0}));
         addEntryRow(advancedGroup, settings, 'preset-directory', _('Preset directory'), _('Optional external preset path.'));
 

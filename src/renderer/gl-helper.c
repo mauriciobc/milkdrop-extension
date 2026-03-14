@@ -18,6 +18,19 @@
 #include <sys/mman.h>
 #endif
 
+#ifdef HAVE_SYSPROF
+#include <sysprof-capture.h>
+#define PERF_BEGIN(name) gint64 _perf_##name = g_get_monotonic_time()
+#define PERF_END(name) \
+    do { \
+        gint64 _dur = g_get_monotonic_time() - _perf_##name; \
+        sysprof_collector_mark(_perf_##name, _dur, "milkdrop", #name, NULL); \
+    } while (0)
+#else
+#define PERF_BEGIN(name) (void)0
+#define PERF_END(name) (void)0
+#endif
+
 /* ── State ─────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -78,6 +91,7 @@ typedef struct {
     bool initialized;
     bool program_ready;
     char *shm_socket_path;
+    GSocketConnection *shm_conn;
     guchar *pixel_buffer;
     gsize pixel_buffer_size;
 } HelperState;
@@ -227,11 +241,14 @@ emit_shader_error(const char *stage, const char *msg)
 }
 
 static void
-emit_frame_stat(unsigned long frame_count, double time_value)
+emit_frame_stat(unsigned long frame_count, double time_value,
+                gint64 render_us, gint64 readback_us)
 {
-    printf("{\"type\":\"frame-stat\",\"frame_count\":%lu,\"time\":%.6f}\n",
+    printf("{\"type\":\"frame-stat\",\"frame_count\":%lu,\"time\":%.6f,\"render_us\":%" G_GINT64_FORMAT ",\"readback_us\":%" G_GINT64_FORMAT "}\n",
         frame_count,
-        time_value);
+        time_value,
+        render_us,
+        readback_us);
     fflush(stdout);
 }
 
@@ -239,47 +256,75 @@ emit_frame_stat(unsigned long frame_count, double time_value)
  * Send frame pixels via shared memory: write to memfd, send fd over Unix socket,
  * then emit frame-pixels-fd JSON on stdout. Returns true on success.
  */
-static bool
-emit_frame_pixels_shm(const guchar *pixels, gsize pixel_count, unsigned long frame_count, int width, int height, int stride, const char *shm_path)
+static void
+close_shm_connection(HelperState *state)
 {
-#ifdef __linux__
-    int memfd = memfd_create("milkdrop-frame", MFD_CLOEXEC);
-    if (memfd < 0)
+    if (!state || !state->shm_conn)
+        return;
+
+    g_object_unref(state->shm_conn);
+    state->shm_conn = NULL;
+}
+
+static bool
+ensure_shm_connection(HelperState *state)
+{
+    if (!state || !state->shm_socket_path)
         return false;
-    ssize_t n = write(memfd, pixels, pixel_count);
-    if (n != (ssize_t)pixel_count) {
-        close(memfd);
-        return false;
-    }
-    if (lseek(memfd, 0, SEEK_SET) != 0) {
-        close(memfd);
-        return false;
-    }
+
+    if (state->shm_conn)
+        return true;
 
     GError *err = NULL;
     GSocketClient *client = g_socket_client_new();
-    GSocketConnectable *addr = G_SOCKET_CONNECTABLE(g_unix_socket_address_new(shm_path));
+    GSocketConnectable *addr = G_SOCKET_CONNECTABLE(g_unix_socket_address_new(state->shm_socket_path));
     GSocketConnection *conn = g_socket_client_connect(client, addr, NULL, &err);
     g_object_unref(addr);
     g_object_unref(client);
     if (!conn) {
         if (err) {
-            emit_telemetry("shm_send", "warn", err->message, 0);
+            emit_telemetry("shm_connect", "warn", err->message, 0);
             g_error_free(err);
         }
-        close(memfd);
         return false;
     }
 
-    gboolean ok = g_unix_connection_send_fd(G_UNIX_CONNECTION(conn), memfd, NULL, &err);
-    g_object_unref(conn);
-    close(memfd);
+    state->shm_conn = conn;
+    GSocket *socket = g_socket_connection_get_socket(conn);
+    if (socket)
+        g_socket_set_timeout(socket, 1);
+    return true;
+}
+
+static bool
+emit_frame_pixels_shm_fd(HelperState *state, int memfd, unsigned long frame_count, int width, int height, int stride)
+{
+#ifdef __linux__
+    if (!ensure_shm_connection(state))
+        return false;
+
+    GError *err = NULL;
+    gboolean ok = g_unix_connection_send_fd(G_UNIX_CONNECTION(state->shm_conn), memfd, NULL, &err);
     if (!ok) {
         if (err) {
             emit_telemetry("shm_send_fd", "warn", err->message, 0);
             g_error_free(err);
+            err = NULL;
         }
-        return false;
+        close_shm_connection(state);
+
+        if (!ensure_shm_connection(state))
+            return false;
+
+        ok = g_unix_connection_send_fd(G_UNIX_CONNECTION(state->shm_conn), memfd, NULL, &err);
+        if (!ok) {
+            if (err) {
+                emit_telemetry("shm_send_fd", "warn", err->message, 0);
+                g_error_free(err);
+            }
+            close_shm_connection(state);
+            return false;
+        }
     }
 
     printf("{\"type\":\"frame-pixels-fd\",\"frame\":%lu,\"width\":%d,\"height\":%d,\"stride\":%d,\"format\":\"rgba8\"}\n",
@@ -299,12 +344,8 @@ emit_frame_pixels_shm(const guchar *pixels, gsize pixel_count, unsigned long fra
 }
 
 static void
-emit_frame_pixels(const guchar *pixels, gsize pixel_count, unsigned long frame_count, int width, int height, int stride, HelperState *state)
+emit_frame_pixels_base64(const guchar *pixels, gsize pixel_count, unsigned long frame_count, int width, int height, int stride)
 {
-    if (state->shm_socket_path && emit_frame_pixels_shm(pixels, pixel_count, frame_count, width, height, stride, state->shm_socket_path))
-        return;
-
-    /* Fallback: Base64 over stdout */
     gchar *encoded = g_base64_encode(pixels, pixel_count);
     printf("{\"type\":\"frame-pixels\",\"frame\":%lu,\"width\":%d,\"height\":%d,\"stride\":%d,\"format\":\"rgba8\",\"data\":\"%s\"}\n",
         frame_count,
@@ -431,6 +472,7 @@ shutdown_helper(HelperState *state)
     state->context = EGL_NO_CONTEXT;
     state->surface = EGL_NO_SURFACE;
     state->initialized = false;
+    close_shm_connection(state);
     g_free(state->pixel_buffer);
     state->pixel_buffer = NULL;
     state->pixel_buffer_size = 0;
@@ -761,12 +803,15 @@ render_frame(HelperState *state, double time_value,
     const int stride = state->stride > 0 ? state->stride : width * 4;
     const gsize pixel_count = (gsize)stride * (gsize)height;
 
+    gint64 render_start = g_get_monotonic_time();
+
     glViewport(0, 0, width, height);
 
     int src_fbo = state->current_fbo;
     int dst_fbo = 1 - src_fbo;
 
     /* ── Pass 1: Draw initial content into dst FBO ─────────────────── */
+    PERF_BEGIN(draw_pass);
     glBindFramebuffer(GL_FRAMEBUFFER, state->fbo[dst_fbo]);
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -793,9 +838,11 @@ render_frame(HelperState *state, double time_value,
     glDrawArrays(GL_TRIANGLES, 0, FULLSCREEN_QUAD_VERTEX_COUNT);
     glDisableVertexAttribArray(0);
     glDisableVertexAttribArray(1);
+    PERF_END(draw_pass);
 
     /* ── Pass 2: Warp — sample src FBO through displaced mesh into dst FBO ── */
     /* Blend warp result over the draw result for feedback accumulation */
+    PERF_BEGIN(warp_pass);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
@@ -831,8 +878,10 @@ render_frame(HelperState *state, double time_value,
     glDisableVertexAttribArray(1);
 
     glDisable(GL_BLEND);
+    PERF_END(warp_pass);
 
     /* ── Pass 3: Composite — read dst FBO, render to pbuffer for readback ── */
+    PERF_BEGIN(composite_pass);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -866,8 +915,47 @@ render_frame(HelperState *state, double time_value,
 
     /* Swap ping-pong */
     state->current_fbo = dst_fbo;
+    PERF_END(composite_pass);
+
+    glFinish();
+    gint64 render_end = g_get_monotonic_time();
+    gint64 render_us = render_end - render_start;
+    gint64 readback_start = render_end;
 
     /* ── Readback ──────────────────────────────────────────────────── */
+    if (state->shm_socket_path) {
+#ifdef __linux__
+        int memfd = memfd_create("milkdrop-frame", MFD_CLOEXEC);
+        if (memfd >= 0 && ftruncate(memfd, (off_t)pixel_count) == 0) {
+            void *mapped = mmap(NULL, pixel_count, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, 0);
+            if (mapped != MAP_FAILED) {
+                glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, mapped);
+
+                GLenum gl_err = glGetError();
+                if (gl_err != GL_NO_ERROR) {
+                    emit_telemetry("readback", "warn", "glReadPixels error", 0);
+                    munmap(mapped, pixel_count);
+                    close(memfd);
+                    return;
+                }
+
+                state->frame_count += 1;
+                if (!emit_frame_pixels_shm_fd(state, memfd, state->frame_count, width, height, stride)) {
+                    emit_frame_pixels_base64((const guchar *)mapped, pixel_count, state->frame_count, width, height, stride);
+                }
+                munmap(mapped, pixel_count);
+                close(memfd);
+                eglSwapBuffers(state->display, state->surface);
+                emit_frame_stat(state->frame_count, time_value, render_us,
+                                g_get_monotonic_time() - readback_start);
+                return;
+            }
+        }
+        if (memfd >= 0)
+            close(memfd);
+#endif
+    }
+
     if (pixel_count > state->pixel_buffer_size || !state->pixel_buffer) {
         emit_telemetry("readback", "warn", "pixel buffer too small", 0);
         return;
@@ -881,12 +969,11 @@ render_frame(HelperState *state, double time_value,
         return;
     }
 
-    glFinish();
     eglSwapBuffers(state->display, state->surface);
     state->frame_count += 1;
-    /* Y flip done in composite shader (uv.y = 1.0 - vTexCoord.y) */
-    emit_frame_pixels(pixels, pixel_count, state->frame_count, width, height, stride, state);
-    emit_frame_stat(state->frame_count, time_value);
+    emit_frame_pixels_base64(pixels, pixel_count, state->frame_count, width, height, stride);
+    emit_frame_stat(state->frame_count, time_value, render_us,
+                    g_get_monotonic_time() - readback_start);
 }
 
 /* ── Main loop ─────────────────────────────────────────────────────── */
@@ -911,6 +998,7 @@ main(int argc, char **argv)
         .context = EGL_NO_CONTEXT,
         .surface = EGL_NO_SURFACE,
         .shm_socket_path = NULL,
+        .shm_conn = NULL,
         .pixel_buffer = NULL,
         .pixel_buffer_size = 0,
     };

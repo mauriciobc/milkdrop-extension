@@ -70,4 +70,42 @@ export async function run(assert) {
         }
         assert(threw, 'loadPreset throws on unknown preset id');
     }
+
+    {
+        let directory = '/tmp/first';
+        const settings = {
+            settings_schema: {
+                has_key: key => key === 'preset-directory',
+            },
+            get_string: () => directory,
+        };
+        const dynamicStore = new PresetStore({settings});
+        dynamicStore._externalLoaded = true;
+        dynamicStore._externalPresets = [{id: 'file:a', name: 'A'}];
+
+        dynamicStore.handleSettingsChanged('preset-directory');
+
+        assert(dynamicStore._externalLoaded === false, 'preset-directory change clears external-loaded cache state');
+        assert(dynamicStore._externalPresets.length === 0, 'preset-directory change clears external preset cache');
+
+        directory = '/tmp/second';
+        dynamicStore.handleSettingsChanged('preset-directory');
+        assert(dynamicStore._externalLoaded === false, 'repeated preset-directory changes remain idempotent');
+    }
+
+    {
+        const guardedStore = new PresetStore({
+            settings: {
+                settings_schema: {
+                    has_key: () => false,
+                },
+                get_string: () => {
+                    throw new Error('should not be called when key is missing');
+                },
+            },
+        });
+
+        const index = await guardedStore.loadIndex();
+        assert(index.length >= 8, 'missing preset-directory key falls back to built-in index without throwing');
+    }
 }

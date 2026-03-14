@@ -381,6 +381,7 @@ export class PresetStore {
         this._logger = logger;
         this._externalPresets = [];
         this._externalLoaded = false;
+        this._lastPresetDirectory = null;
     }
 
     async loadIndex() {
@@ -409,16 +410,23 @@ export class PresetStore {
     invalidateCache() {
         this._externalLoaded = false;
         this._externalPresets = [];
+        this._lastPresetDirectory = null;
+    }
+
+    handleSettingsChanged(key) {
+        if (key === 'preset-directory')
+            this.invalidateCache();
     }
 
     async _ensureExternalLoaded() {
-        if (this._externalLoaded)
+        const dirPath = this._getPresetDirectorySetting();
+        if (this._externalLoaded && dirPath === this._lastPresetDirectory)
             return;
 
         this._externalLoaded = true;
         this._externalPresets = [];
+        this._lastPresetDirectory = dirPath;
 
-        const dirPath = this._settings?.get_string?.('preset-directory')?.trim?.() ?? '';
         if (!dirPath)
             return;
 
@@ -478,6 +486,28 @@ export class PresetStore {
             this._externalPresets.push(preset);
         } catch (error) {
             this._logger.debug?.(`milkdrop failed to load preset ${filename}: ${error.message}`);
+        }
+    }
+
+    _getPresetDirectorySetting() {
+        if (!this._hasSettingKey('preset-directory'))
+            return '';
+
+        try {
+            return this._settings.get_string('preset-directory')?.trim?.() ?? '';
+        } catch (_error) {
+            return '';
+        }
+    }
+
+    _hasSettingKey(key) {
+        try {
+            const schema = this._settings?.settings_schema ?? this._settings?.get_settings_schema?.();
+            if (schema?.has_key)
+                return Boolean(schema.has_key(key));
+            return Boolean(this._settings);
+        } catch (_error) {
+            return false;
         }
     }
 }

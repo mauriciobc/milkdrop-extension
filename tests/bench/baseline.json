@@ -1,0 +1,4 @@
+{
+  "_comment": "Benchmark baseline for regression detection. Values in microseconds. Run: gjs -m tests/bench/run.js -- --json > tests/bench/baseline.json",
+  "benchmarks": {}
+}

@@ -34,6 +34,7 @@ extension_sources = files(
   'src/extension/gnomeShellOverride.js',
   'src/extension/ipc.js',
   'src/extension/monitor.js',
+  'src/extension/perf.js',
   'src/extension/prefs.js',
   'src/extension/presets.js',
   'src/extension/windowTitle.js',
@@ -58,12 +59,21 @@ if has_c_compiler
   gio_unix_dep = dependency('gio-unix-2.0', required: false)
   json_glib_dep = dependency('json-glib-1.0', required: false)
   math_dep = c_compiler.find_library('m', required: false)
+  sysprof_dep = dependency('sysprof-capture-4', required: false)
+
+  gl_helper_deps = [egl_dep, epoxy_dep, glib_dep, gio_unix_dep, json_glib_dep, math_dep]
+  gl_helper_c_args = []
+  if sysprof_dep.found()
+    gl_helper_deps += sysprof_dep
+    gl_helper_c_args += '-DHAVE_SYSPROF=1'
+  endif
 
   if egl_dep.found() and epoxy_dep.found() and glib_dep.found() and json_glib_dep.found() and gio_unix_dep.found()
     executable(
       'milkdrop-gl-helper',
       'src/renderer/gl-helper.c',
-      dependencies: [egl_dep, epoxy_dep, glib_dep, gio_unix_dep, json_glib_dep, math_dep],
+      dependencies: gl_helper_deps,
+      c_args: gl_helper_c_args,
       install: true,
       install_dir: join_paths(extension_dir, 'renderer')
     )
@@ -88,6 +98,12 @@ if gjs.found()
     'unit-tests',
     gjs,
     args: ['-m', 'tests/run.js'],
+    workdir: meson.project_source_root(),
+  )
+  benchmark(
+    'perf',
+    gjs,
+    args: ['-m', 'tests/bench/run.js', '--', '--json'],
     workdir: meson.project_source_root(),
   )
 else

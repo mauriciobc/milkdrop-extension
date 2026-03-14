@@ -41,11 +41,15 @@ async function main() {
 
     await runTest('extension/evaluator', './extension/evaluator.test.js');
     await runTest('extension/presets', './extension/presets.test.js');
+    await runTest('extension/settings-contract', './extension/settings-contract.test.js');
     await runTest('extension/audio', './extension/audio.test.js');
     await runTest('extension/window-title', './extension/window-title.test.js');
     await runTest('renderer/vertex-eval', './renderer/vertex-eval.test.js');
     await runTest('renderer/mesh', './renderer/mesh.test.js');
     await runTest('renderer/gl-bridge', './renderer/gl-bridge.test.js');
+    await runTest('renderer/glarea', './renderer/glarea.test.js');
+    await runTest('renderer/ipc-client', './renderer/ipc-client.test.js');
+    await runTest('renderer/renderer', './renderer/renderer.test.js');
 
     console.log(`\n${passed} passed, ${failed} failed`);
     if (failed > 0)

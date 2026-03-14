@@ -3,6 +3,98 @@ import GLib from 'gi://GLib';
 
 const encoder = new TextEncoder();
 
+const PERF_WINDOW_SIZE = 300;
+
+/**
+ * Rolling frame-time statistics collector.
+ * Collects render_us and readback_us from frame-stat messages and
+ * computes percentiles over a sliding window.
+ */
+export class PerfCollector {
+    constructor(windowSize = PERF_WINDOW_SIZE) {
+        this._windowSize = windowSize;
+        this._renderTimes = new Float64Array(windowSize);
+        this._readbackTimes = new Float64Array(windowSize);
+        this._totalTimes = new Float64Array(windowSize);
+        this._index = 0;
+        this._count = 0;
+        this._lastFrameCount = 0;
+        this._firstFrameTime = 0;
+        this._lastFrameTime = 0;
+    }
+
+    record(frameStat) {
+        const renderUs = frameStat.render_us ?? 0;
+        const readbackUs = frameStat.readback_us ?? 0;
+        const i = this._index % this._windowSize;
+        this._renderTimes[i] = renderUs;
+        this._readbackTimes[i] = readbackUs;
+        this._totalTimes[i] = renderUs + readbackUs;
+        this._index++;
+        if (this._count < this._windowSize)
+            this._count++;
+        this._lastFrameCount = frameStat.frame_count ?? this._index;
+        const t = frameStat.time ?? 0;
+        if (this._firstFrameTime === 0)
+            this._firstFrameTime = t;
+        this._lastFrameTime = t;
+    }
+
+    getStats() {
+        if (this._count === 0)
+            return null;
+
+        const n = this._count;
+        const render = this._sorted(this._renderTimes, n);
+        const readback = this._sorted(this._readbackTimes, n);
+        const total = this._sorted(this._totalTimes, n);
+        const elapsed = this._lastFrameTime - this._firstFrameTime;
+        const fps = elapsed > 0 ? this._lastFrameCount / elapsed : 0;
+
+        return {
+            frames: this._lastFrameCount,
+            windowSize: n,
+            fps: Math.round(fps * 100) / 100,
+            render: this._percentiles(render),
+            readback: this._percentiles(readback),
+            total: this._percentiles(total),
+        };
+    }
+
+    reset() {
+        this._index = 0;
+        this._count = 0;
+        this._lastFrameCount = 0;
+        this._firstFrameTime = 0;
+        this._lastFrameTime = 0;
+    }
+
+    _sorted(arr, n) {
+        const slice = new Float64Array(n);
+        const offset = this._index > this._windowSize ? this._index % this._windowSize : 0;
+        for (let i = 0; i < n; i++)
+            slice[i] = arr[(offset + i) % this._windowSize];
+        slice.sort();
+        return slice;
+    }
+
+    _percentiles(sorted) {
+        const n = sorted.length;
+        const p = (pct) => sorted[Math.max(0, Math.min(Math.ceil(pct / 100 * n) - 1, n - 1))];
+        let sum = 0;
+        for (let i = 0; i < n; i++)
+            sum += sorted[i];
+        return {
+            min: sorted[0],
+            median: p(50),
+            mean: Math.round(sum / n * 100) / 100,
+            p95: p(95),
+            p99: p(99),
+            max: sorted[n - 1],
+        };
+    }
+}
+
 function buildHelperPath() {
     const moduleFile = Gio.File.new_for_uri(import.meta.url);
     return GLib.build_filenamev([
@@ -40,14 +132,21 @@ export class GlBridge {
         this._writeQueue = [];
         this._writePending = false;
         this._shmFdQueue = [];
+        this._pendingFrameMetaQueue = [];
         this._shmListener = null;
         this._shmSocketPath = null;
         this._shmAcceptPending = false;
+        this._shmConnection = null;
+        this._shmReceivePending = false;
+        this._shmReadPending = false;
+        this._droppedFrameWrites = 0;
+        this._perfCollector = new PerfCollector();
     }
 
     static WATCHDOG_INTERVAL_MS = 5000;
     static WATCHDOG_TIMEOUT_MS = 10000;
     static MAX_RESTARTS = 3;
+    static MAX_WRITE_QUEUE_LENGTH = 120;
     static DEFAULT_ZOOM = 1.0;
     static DEFAULT_DECAY = 0.98;
 
@@ -63,12 +162,17 @@ export class GlBridge {
         return this._lastFramePixels;
     }
 
+    getPerfStats() {
+        return this._perfCollector.getStats();
+    }
+
     start({width, height}) {
         if (this._running)
             return true;
 
         this._writeQueue = [];
         this._writePending = false;
+        this._droppedFrameWrites = 0;
 
         if (!this.available) {
             this._ready = false;
@@ -96,6 +200,8 @@ export class GlBridge {
         this._cancellable = new Gio.Cancellable();
 
         this._shmFdQueue = [];
+        this._pendingFrameMetaQueue = [];
+        this._shmReadPending = false;
         this._setupShmListener();
 
         const helperArgv = this._shmSocketPath
@@ -276,6 +382,7 @@ export class GlBridge {
 
     _teardownShmListener() {
         this._shmAcceptPending = false;
+        this._closeShmConnection();
         if (this._shmListener) {
             try {
                 this._shmListener.close();
@@ -290,14 +397,73 @@ export class GlBridge {
             }
             this._shmSocketPath = null;
         }
+        this._closeQueuedShmFds();
         this._shmFdQueue = [];
+        this._pendingFrameMetaQueue = [];
+        this._shmReadPending = false;
+    }
+
+    _closeShmConnection() {
+        this._shmReceivePending = false;
+        if (!this._shmConnection)
+            return;
+
+        const connection = this._shmConnection;
+        this._shmConnection = null;
+        try {
+            connection.close(null);
+        } catch (_e) {
+        }
+    }
+
+    _closeQueuedShmFds() {
+        for (const fd of this._shmFdQueue) {
+            if (typeof fd !== 'number' || fd < 0)
+                continue;
+            try {
+                const stream = Gio.UnixInputStream.new(fd, true);
+                stream.close(null);
+            } catch (_e) {
+            }
+        }
     }
 
     send(message) {
         if (!this._running || !this._stdin)
             return false;
 
-        this._writeQueue.push(`${JSON.stringify(message)}\n`);
+        if (this._writeQueue.length >= GlBridge.MAX_WRITE_QUEUE_LENGTH) {
+            if (message.type === 'frame') {
+                this._droppedFrameWrites += 1;
+                if (this._droppedFrameWrites === 1 || this._droppedFrameWrites % 60 === 0) {
+                    this._emit({
+                        type: 'telemetry',
+                        stage: 'helper_write_backpressure',
+                        level: 'warn',
+                        msg: `dropping frame writes due to full queue (${this._writeQueue.length}) count=${this._droppedFrameWrites}`,
+                    });
+                }
+                return false;
+            }
+
+            const oldestFrameIndex = this._writeQueue.findIndex(entry => entry.type === 'frame');
+            if (oldestFrameIndex >= 0) {
+                this._writeQueue.splice(oldestFrameIndex, 1);
+            } else {
+                this._writeQueue.shift();
+                this._emit({
+                    type: 'telemetry',
+                    stage: 'helper_write_backpressure',
+                    level: 'warn',
+                    msg: 'write queue full without frame payloads; dropping oldest control message',
+                });
+            }
+        }
+
+        this._writeQueue.push({
+            type: message.type ?? 'unknown',
+            payload: `${JSON.stringify(message)}\n`,
+        });
         this._flushWriteQueue();
         return true;
     }
@@ -307,8 +473,8 @@ export class GlBridge {
             return;
 
         this._writePending = true;
-        const payload = this._writeQueue.shift();
-        const bytes = new GLib.Bytes(encoder.encode(payload));
+        const entry = this._writeQueue.shift();
+        const bytes = new GLib.Bytes(encoder.encode(entry.payload));
         const capturedStdin = this._stdin;
         capturedStdin.write_bytes_async(bytes, GLib.PRIORITY_DEFAULT, this._cancellable, (stream, result) => {
             if (this._stdin !== capturedStdin)
@@ -331,7 +497,7 @@ export class GlBridge {
     }
 
     _armShmAcceptLoop() {
-        if (!this._shmListener || !this._running || !this._cancellable || this._shmAcceptPending)
+        if (!this._shmListener || !this._running || !this._cancellable || this._shmAcceptPending || this._shmConnection)
             return;
 
         this._shmAcceptPending = true;
@@ -355,70 +521,23 @@ export class GlBridge {
                     return;
                 }
 
-                if (typeof connection.receive_fd_async === 'function') {
-                    connection.receive_fd_async(this._cancellable, (conn, res) => {
-                        if (!this._running)
-                            return;
-
-                        try {
-                            const fd = conn.receive_fd_finish(res);
-                            if (fd >= 0) {
-                                this._shmFdQueue.push(fd);
-                            } else {
-                                this._emit({
-                                    type: 'telemetry',
-                                    stage: 'shm_receive_fd',
-                                    level: 'warn',
-                                    msg: 'received invalid shm file descriptor',
-                                });
-                            }
-                        } catch (error) {
-                            this._emit({
-                                type: 'telemetry',
-                                stage: 'shm_receive_fd',
-                                level: 'warn',
-                                msg: error.message,
-                            });
-                        }
-
-                        this._armShmAcceptLoop();
+                if (typeof connection.receive_fd_async !== 'function') {
+                    this._emit({
+                        type: 'telemetry',
+                        stage: 'shm_accept',
+                        level: 'warn',
+                        msg: 'shm connection missing async fd receive support; disabling shm transport',
                     });
-                    return;
-                }
-
-                if (typeof connection.receive_fd === 'function') {
                     try {
-                        const fd = connection.receive_fd(this._cancellable);
-                        if (fd >= 0) {
-                            this._shmFdQueue.push(fd);
-                        } else {
-                            this._emit({
-                                type: 'telemetry',
-                                stage: 'shm_receive_fd',
-                                level: 'warn',
-                                msg: 'received invalid shm file descriptor',
-                            });
-                        }
-                    } catch (error) {
-                        this._emit({
-                            type: 'telemetry',
-                            stage: 'shm_receive_fd',
-                            level: 'warn',
-                            msg: error.message,
-                        });
+                        connection.close(null);
+                    } catch (_e) {
                     }
-
-                    this._armShmAcceptLoop();
+                    this._teardownShmListener();
                     return;
                 }
 
-                this._emit({
-                    type: 'telemetry',
-                    stage: 'shm_accept',
-                    level: 'warn',
-                    msg: 'shm connection missing fd receive support',
-                });
-                this._armShmAcceptLoop();
+                this._shmConnection = connection;
+                this._startShmReceiveLoop(connection);
             } catch (error) {
                 if (!error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {
                     this._emit({
@@ -430,6 +549,53 @@ export class GlBridge {
                     this._armShmAcceptLoop();
                 }
             }
+        });
+    }
+
+    _startShmReceiveLoop(connection) {
+        if (!this._running || !this._cancellable || !connection || this._shmConnection !== connection)
+            return;
+
+        if (this._shmReceivePending)
+            return;
+
+        this._shmReceivePending = true;
+        connection.receive_fd_async(this._cancellable, (conn, res) => {
+            if (this._shmConnection !== connection) {
+                this._shmReceivePending = false;
+                return;
+            }
+
+            this._shmReceivePending = false;
+            if (!this._running)
+                return;
+
+            try {
+                const fd = conn.receive_fd_finish(res);
+                if (fd >= 0) {
+                    this._shmFdQueue.push(fd);
+                    this._drainShmFrameQueue();
+                } else {
+                    this._emit({
+                        type: 'telemetry',
+                        stage: 'shm_receive_fd',
+                        level: 'warn',
+                        msg: 'received invalid shm file descriptor',
+                    });
+                }
+            } catch (error) {
+                if (error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                    return;
+                this._emit({
+                    type: 'telemetry',
+                    stage: 'shm_receive_fd',
+                    level: 'warn',
+                    msg: error.message,
+                });
+                this._closeShmConnection();
+                this._armShmAcceptLoop();
+            }
+            this._startShmReceiveLoop(connection);
         });
     }
 
@@ -473,47 +639,14 @@ export class GlBridge {
         }
 
         if (message.type === 'frame-pixels-fd') {
-            const width = message.width ?? 1;
-            const height = message.height ?? 1;
-            const stride = message.stride ?? Math.max(1, width * 4);
-            const pixelCount = stride * height;
-            const fd = this._shmFdQueue.shift();
-            if (fd === undefined) {
-                this._emit({
-                    type: 'telemetry',
-                    stage: 'shm_fd',
-                    level: 'warn',
-                    msg: 'frame-pixels-fd with no pending fd',
-                });
-                return;
-            }
-            try {
-                const stream = Gio.UnixInputStream.new(fd, true);
-                const bytes = stream.read_bytes(pixelCount, null);
-                stream.close(null);
-                this._lastFrameSerial += 1;
-                this._lastFrameTime = GLib.get_monotonic_time();
-                this._lastFramePixels = {
-                    frame: message.frame ?? 0,
-                    width,
-                    height,
-                    stride,
-                    format: message.format ?? 'rgba8',
-                    bytes: bytes.get_data(),
-                    serial: this._lastFrameSerial,
-                };
-                this._emit({
-                    type: 'frame-pixels',
-                    ...this._lastFramePixels,
-                });
-            } catch (e) {
-                this._emit({
-                    type: 'telemetry',
-                    stage: 'shm_read',
-                    level: 'warn',
-                    msg: String(e?.message ?? e),
-                });
-            }
+            this._pendingFrameMetaQueue.push({
+                frame: message.frame ?? 0,
+                width: message.width ?? 1,
+                height: message.height ?? 1,
+                stride: message.stride ?? Math.max(1, (message.width ?? 1) * 4),
+                format: message.format ?? 'rgba8',
+            });
+            this._drainShmFrameQueue();
             return;
         }
 
@@ -542,25 +675,19 @@ export class GlBridge {
             }
 
             const decoded = GLib.base64_decode(message.data ?? '');
-            this._lastFrameSerial += 1;
-            this._lastFrameTime = GLib.get_monotonic_time();
-            this._lastFramePixels = {
+            const bytes = GLib.Bytes.new(decoded);
+            this._publishFramePixels({
                 frame: message.frame ?? 0,
                 width: message.width ?? 1,
                 height: message.height ?? 1,
                 stride: message.stride ?? Math.max(1, (message.width ?? 1) * 4),
                 format: message.format ?? 'rgba8',
-                bytes: decoded,
-                serial: this._lastFrameSerial,
-            };
-            this._emit({
-                type: 'frame-pixels',
-                ...this._lastFramePixels,
-            });
+            }, bytes);
             return;
         }
 
         if (message.type === 'frame-stat') {
+            this._perfCollector.record(message);
             this._emit(message);
             return;
         }
@@ -587,6 +714,86 @@ export class GlBridge {
         }
 
         this._emit(message);
+    }
+
+    _drainShmFrameQueue() {
+        if (this._shmReadPending)
+            return;
+
+        const metadata = this._pendingFrameMetaQueue.shift();
+        const fd = this._shmFdQueue.shift();
+        if (!metadata || fd === undefined) {
+            if (metadata)
+                this._pendingFrameMetaQueue.unshift(metadata);
+            if (fd !== undefined)
+                this._shmFdQueue.unshift(fd);
+            return;
+        }
+
+        const pixelCount = metadata.stride * metadata.height;
+        this._shmReadPending = true;
+        this._readFrameBytesAsync(fd, pixelCount, (error, bytes) => {
+            this._shmReadPending = false;
+            if (error) {
+                this._emit({
+                    type: 'telemetry',
+                    stage: 'shm_read',
+                    level: 'warn',
+                    msg: String(error?.message ?? error),
+                });
+            } else if (bytes) {
+                this._publishFramePixels(metadata, bytes);
+            }
+            this._drainShmFrameQueue();
+        });
+    }
+
+    _readFrameBytesAsync(fd, pixelCount, callback) {
+        let stream = null;
+        try {
+            stream = Gio.UnixInputStream.new(fd, true);
+            stream.read_bytes_async(pixelCount, GLib.PRIORITY_DEFAULT, this._cancellable, (input, result) => {
+                try {
+                    const bytes = input.read_bytes_finish(result);
+                    if (bytes.get_size() !== pixelCount) {
+                        callback(new Error(`incomplete frame bytes read expected=${pixelCount} got=${bytes.get_size()}`), null);
+                        return;
+                    }
+                    callback(null, bytes);
+                } catch (error) {
+                    callback(error, null);
+                } finally {
+                    try {
+                        input.close(null);
+                    } catch (_e) {
+                    }
+                }
+            });
+        } catch (error) {
+            try {
+                stream?.close?.(null);
+            } catch (_e) {
+            }
+            callback(error, null);
+        }
+    }
+
+    _publishFramePixels(metadata, bytes) {
+        this._lastFrameSerial += 1;
+        this._lastFrameTime = GLib.get_monotonic_time();
+        this._lastFramePixels = {
+            frame: metadata.frame ?? 0,
+            width: metadata.width ?? 1,
+            height: metadata.height ?? 1,
+            stride: metadata.stride ?? Math.max(1, (metadata.width ?? 1) * 4),
+            format: metadata.format ?? 'rgba8',
+            bytes,
+            serial: this._lastFrameSerial,
+        };
+        this._emit({
+            type: 'frame-pixels',
+            ...this._lastFramePixels,
+        });
     }
 
     _handleHelperExit(stage, msg) {
