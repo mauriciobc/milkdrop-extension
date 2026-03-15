@@ -1,0 +1,30 @@
+Gjs-Console-Message: 21:03:40.366: Running unit tests...
+
+
+(gjs:185487): Gjs-Console-CRITICAL **: 21:03:40.387: FAIL: src/extension/audio.js references audio-restart-max-attempts
+
+(gjs:185487): Gjs-Console-CRITICAL **: 21:03:40.390: FAIL: _stopPipeline clears history sample count
+
+(gjs:185487): Gjs-Console-CRITICAL **: 21:03:40.390: FAIL: _stopPipeline resets beat cooldown
+
+(gjs:185487): Gjs-Console-CRITICAL **: 21:03:40.390: FAIL: _stopPipeline clears stale beat value
+
+(gjs:185487): Gjs-Console-CRITICAL **: 21:03:40.390: extension/audio: this._parseSpectrumBands is not a function
+
+(gjs:185487): Gjs-Console-CRITICAL **: 21:03:40.390: _handleSpectrumMessage@file:///home/mauriciobc/Documentos/Code/milkdrop-extension/src/extension/audio.js:367:31
+run@file:///home/mauriciobc/Documentos/Code/milkdrop-extension/tests/extension/audio.test.js:87:16
+runTest@file:///home/mauriciobc/Documentos/Code/milkdrop-extension/tests/run.js:28:42
+async*main@file:///home/mauriciobc/Documentos/Code/milkdrop-extension/tests/run.js:45:11
+async*@file:///home/mauriciobc/Documentos/Code/milkdrop-extension/tests/run.js:73:1
+
+Gjs-Console-Message: 21:03:40.542: 
+742 passed, 5 failed
+
+(gjs:185487): Gjs-Console-CRITICAL **: 21:03:40.542: Error: 5 test(s) failed
+main@file:///home/mauriciobc/Documentos/Code/milkdrop-extension/tests/run.js:70:15
+async*@file:///home/mauriciobc/Documentos/Code/milkdrop-extension/tests/run.js:73:1
+  
+
+(gjs:185487): Gjs-WARNING **: 21:03:40.542: Unhandled promise rejection. To suppress this warning, add an error handler to your promise chain with .catch() or a try-catch block around your await expression. Stack trace of the failed promise:
+@file:///home/mauriciobc/Documentos/Code/milkdrop-extension/tests/run.js:73:8
+

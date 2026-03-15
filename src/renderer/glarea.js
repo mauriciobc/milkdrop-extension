@@ -8,7 +8,6 @@ import {GlBridge} from './gl-bridge.js';
 import {createDefaultMesh, applyWarpToMesh} from './mesh.js';
 import {VertexEvaluator} from './vertex-eval.js';
 
-const HELPER_STREAM_MAX_DIMENSION = 192;
 const FALLBACK_STRIPE_COUNT = 12;
 const FALLBACK_ORB_MIN_SIZE = 28;
 const FALLBACK_ORB_SIZE_FACTOR = 0.08;
@@ -237,15 +236,8 @@ class MilkdropGLArea extends Gtk.Widget {
     _buildHelperStreamSize() {
         const widgetWidth = Math.max(1, this.get_width(), this.get_allocated_width?.() ?? 0, 320);
         const widgetHeight = Math.max(1, this.get_height(), this.get_allocated_height?.() ?? 0, 180);
-        const largestDimension = Math.max(widgetWidth, widgetHeight);
-        const scale = largestDimension > HELPER_STREAM_MAX_DIMENSION
-            ? HELPER_STREAM_MAX_DIMENSION / largestDimension
-            : 1.0;
 
-        return [
-            Math.max(1, Math.round(widgetWidth * scale)),
-            Math.max(1, Math.round(widgetHeight * scale)),
-        ];
+        return [widgetWidth, widgetHeight];
     }
 
     _getHelperTexture() {

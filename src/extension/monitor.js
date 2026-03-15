@@ -1,5 +1,6 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import GObject from 'gi://GObject';
 import Meta from 'gi://Meta';
 
 import * as Config from 'resource:///org/gnome/shell/misc/config.js';
@@ -20,6 +21,16 @@ const VALID_ROTATION_MODES = new Set(['random', 'sequential']);
 
 function _debugIpc() {
     return GLib.getenv('MILKDROP_DEBUG_IPC') === '1';
+}
+
+function _isDisposed(obj) {
+    try {
+        if (!obj)
+            return true;
+        return GObject.Object.prototype.toString.call(obj).includes('DISPOSED');
+    } catch (_e) {
+        return true;
+    }
 }
 
 // Module-level guard: prevents _handleWindowMapped from creating new
@@ -99,8 +110,15 @@ class ManagedRendererWindow {
             this._refreshSourceId = 0;
         }
 
-        for (const signalId of this._signals)
-            this._window.disconnect(signalId);
+        if (this._window) {
+            for (const signalId of this._signals) {
+                try {
+                    this._window.disconnect(signalId);
+                } catch (_error) {
+                    // Window may already be finalized.
+                }
+            }
+        }
         this._signals = [];
         this._window = null;
     }
@@ -217,6 +235,7 @@ class RendererProcess {
         });
         this.subprocess = null;
         this._killTimeoutId = 0;
+        this._stopIdleId = 0;
         this._loggedNotReady = false;
     }
 
@@ -285,27 +304,34 @@ class RendererProcess {
         launcher.set_cwd(GLib.get_home_dir());
 
         const shellVersion = parseInt(Config.PACKAGE_VERSION.split('.')[0], 10);
-        if (Meta.is_wayland_compositor()) {
-            if (shellVersion >= 49 && typeof Meta.WaylandClient?.new_subprocess === 'function') {
-                this._launchPath = 'wayland-new_subprocess';
-                this._waylandClient = Meta.WaylandClient.new_subprocess(global.context, launcher, argv);
-                this.subprocess = this._waylandClient.get_subprocess();
-            } else if (typeof Meta.WaylandClient?.new === 'function') {
-                this._launchPath = 'wayland-spawnv';
-                this._waylandClient = Meta.WaylandClient.new(global.context, launcher);
-                this.subprocess = this._waylandClient.spawnv(global.display, argv);
+        this._logger.warn?.(
+            `[GNOME Milkdrop] renderer launch monitor=${this._monitor.index} rendererPath=${rendererPath} socketPath=${this._ipc.socketPath} shell=${shellVersion}`
+        );
+        try {
+            if (Meta.is_wayland_compositor()) {
+                if (shellVersion >= 49 && typeof Meta.WaylandClient?.new_subprocess === 'function') {
+                    this._launchPath = 'wayland-new_subprocess';
+                    this._waylandClient = Meta.WaylandClient.new_subprocess(global.context, launcher, argv);
+                    this.subprocess = this._waylandClient.get_subprocess();
+                } else if (typeof Meta.WaylandClient?.new === 'function') {
+                    this._launchPath = 'wayland-spawnv';
+                    this._waylandClient = Meta.WaylandClient.new(global.context, launcher);
+                    this.subprocess = this._waylandClient.spawnv(global.display, argv);
+                } else {
+                    this._launchPath = 'wayland-launcher-spawnv';
+                    this.subprocess = launcher.spawnv(argv);
+                }
             } else {
-                this._launchPath = 'wayland-launcher-spawnv';
+                this._launchPath = 'x11-launcher-spawnv';
                 this.subprocess = launcher.spawnv(argv);
             }
-        } else {
-            this._launchPath = 'x11-launcher-spawnv';
-            this.subprocess = launcher.spawnv(argv);
+        } catch (spawnError) {
+            this._logger.warn?.(
+                `[GNOME Milkdrop] renderer spawn failed monitor=${this._monitor.index}: ${spawnError.message}`
+            );
+            this._running = false;
+            return;
         }
-
-        this._logger.info?.(
-            `milkdrop renderer launch monitor=${this._monitor.index} shell=${shellVersion} path=${this._launchPath}`
-        );
 
         if (this.subprocess?.get_stdout_pipe()) {
             this._stdout = new Gio.DataInputStream({
@@ -316,7 +342,7 @@ class RendererProcess {
 
         this.subprocess?.wait_async(this._cancellable, (process, result) => {
             if (this._killTimeoutId) {
-                GLib.Source.remove(this._killTimeoutId);
+                GLib.source_remove(this._killTimeoutId);
                 this._killTimeoutId = 0;
             }
             if (!this._running && !this._stopping)
@@ -360,33 +386,44 @@ class RendererProcess {
         this._windowManaged = false;
         this._ipc.disable();
         this._cancellable.cancel();
+
+        if (this._stopIdleId) {
+            GLib.source_remove(this._stopIdleId);
+            this._stopIdleId = 0;
+        }
+
+        // Capture refs for deferred cleanup — I/O calls are blocked during GC.
         const process = this.subprocess;
-        try {
-            process?.send_signal(15);
-        } catch (_error) {
-        }
-        if (process) {
-            this._killTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 3, () => {
-                try {
-                    process.send_signal(9);
-                } catch (_e) {}
-                this._killTimeoutId = 0;
-                return false;
-            });
-        }
-        try {
-            this._waylandClient?.close?.();
-        } catch (_error) {
-        }
+        const waylandClient = this._waylandClient;
+        const stdout = this._stdout;
+
         this.subprocess = null;
-        try {
-            if (this._stdout) {
-                this._stdout.close(null);
-            }
-        } catch (_error) {
-        }
         this._stdout = null;
         this._waylandClient = null;
+
+        // Defer I/O that GJS blocks during garbage collection.
+        this._stopIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+            this._stopIdleId = 0;
+            try {
+                process?.send_signal(15);
+            } catch (_e) {}
+            if (process) {
+                this._killTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 3, () => {
+                    try {
+                        process.send_signal(9);
+                    } catch (_e) {}
+                    this._killTimeoutId = 0;
+                    return false;
+                });
+            }
+            try {
+                waylandClient?.close?.();
+            } catch (_e) {}
+            try {
+                stdout?.close(null);
+            } catch (_e) {}
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     sendFrame(frameState) {
@@ -416,6 +453,12 @@ class RendererProcess {
             frame: preset.frame,
             vertex: preset.vertex ?? null,
             shaders: preset.shaders ?? null,
+            baseVals: preset.baseVals,
+            init_eqs: preset.init_eqs,
+            frame_eqs: preset.frame_eqs,
+            pixel_eqs: preset.pixel_eqs,
+            shapes: preset.shapes,
+            waves: preset.waves,
         } : null;
         this._flushPendingPresetLoad();
     }
@@ -432,14 +475,14 @@ class RendererProcess {
 
         switch (message.type) {
         case 'ready':
-            this._logger.info?.(`milkdrop renderer IPC ready for monitor ${this._monitor.index}`);
+            this._logger.warn?.(`[GNOME Milkdrop] renderer IPC ready monitor=${this._monitor.index}`);
             this._flushPendingPresetLoad();
             this._flushPendingTextOverlaySetting();
             break;
         case 'helper-ready':
             this._helperReady = message.ok ?? false;
-            this._logger.info?.(
-                `milkdrop helper ready monitor=${this._monitor.index} ok=${this._helperReady} stage=${message.stage ?? 'unknown'} msg=${message.msg ?? ''}`
+            this._logger.warn?.(
+                `[GNOME Milkdrop] helper ready monitor=${this._monitor.index} ok=${this._helperReady} stage=${message.stage ?? 'unknown'} msg=${message.msg ?? ''}`
             );
             break;
         case 'frame-stat':
@@ -544,6 +587,8 @@ export class MonitorManager {
         this._windowManagerSignalId = 0;
         this._restartTimeoutId = 0;
         this._presetRotationId = 0;
+        this._enableIdleId = 0;
+        this._spawnRetryId = 0;
         this._settingsSignals = [];
         this._paused = false;
         this._lastBeatCutTime = 0;
@@ -632,7 +677,8 @@ export class MonitorManager {
         });
 
         // Defer heavy work so enable() returns immediately and Shell/Extensions stay responsive
-        GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+        this._enableIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            this._enableIdleId = 0;
             if (!this._enabled || this._disabling)
                 return GLib.SOURCE_REMOVE;
             this._audioEngine.enable();
@@ -673,6 +719,16 @@ export class MonitorManager {
         this._enabled = false;
         this._paused = false;
         this._audioEngine.disable();
+
+        if (this._enableIdleId) {
+            GLib.source_remove(this._enableIdleId);
+            this._enableIdleId = 0;
+        }
+
+        if (this._spawnRetryId) {
+            GLib.source_remove(this._spawnRetryId);
+            this._spawnRetryId = 0;
+        }
 
         for (const {owner, id} of this._monitorSignals)
             owner.disconnect(id);
@@ -741,13 +797,18 @@ export class MonitorManager {
             return;
 
         const monitors = Main.layoutManager.monitors;
-        const enabledMonitors = new Set(this._settings.get_strv('enabled-monitors'));
+        const enabledMonitors = new Set(this._getStrvSetting('enabled-monitors', []));
         const msg = `[GNOME Milkdrop] _spawnForCurrentMonitors: ${monitors.length} monitor(s), enabledMonitors size=${enabledMonitors.size}`;
         this._logger.warn?.(msg);
         GLib.log_structured?.('GNOME Milkdrop', GLib.LogLevelFlags.LEVEL_WARNING, { MESSAGE: msg });
 
         if (monitors.length === 0) {
-            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
+            if (this._spawnRetryId)
+                GLib.source_remove(this._spawnRetryId);
+            this._spawnRetryId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
+                this._spawnRetryId = 0;
+                if (!this._enabled || this._disabling)
+                    return GLib.SOURCE_REMOVE;
                 this._spawnForCurrentMonitors();
                 return GLib.SOURCE_REMOVE;
             });
@@ -767,7 +828,7 @@ export class MonitorManager {
                 monitor,
                 logger: this._logger,
                 strictRenderPath: this._strictRenderPathSupported
-                    ? this._settings.get_boolean('strict-render-path')
+                    ? this._getBooleanSetting('strict-render-path', false)
                     : false,
                 textOverlayVisible: this._getBooleanSetting('text-overlay-enabled', true),
                 onNotify: (title, body) => this._notifyUser(title, body),
@@ -788,33 +849,44 @@ export class MonitorManager {
         if (this._frameSourceId)
             GLib.source_remove(this._frameSourceId);
 
-        const fpsLimit = Math.max(1, this._settings.get_int('fps-limit'));
+        const fpsLimit = Math.max(1, this._getIntSetting('fps-limit', 60));
         const intervalMs = Math.max(16, Math.round(1000 / fpsLimit));
         this._frameSourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, intervalMs, () => {
-            if (!this._enabled || this._disabling || this._frameSourceId === 0)
-                return GLib.SOURCE_REMOVE;
+            try {
+                if (!this._enabled || this._disabling || this._frameSourceId === 0) {
+                    this._frameSourceId = 0;
+                    return GLib.SOURCE_REMOVE;
+                }
 
-            if (this._paused)
-                return GLib.SOURCE_CONTINUE;
+                if (this._paused)
+                    return GLib.SOURCE_CONTINUE;
 
-            this._frameCounter += 1;
+                this._frameCounter += 1;
 
-            const pumpToken = perfBegin('frame-pump');
+                const pumpToken = perfBegin('frame-pump');
 
-            if (_debugIpc() && this._frameCounter % 60 === 0)
-                this._logger.info?.(`milkdrop [extension] pump tick frame=${this._frameCounter} processes=${this._rendererProcesses.size} paused=${this._paused}`);
+                if (_debugIpc() && this._frameCounter % 60 === 0)
+                    this._logger.info?.(`milkdrop [extension] pump tick frame=${this._frameCounter} processes=${this._rendererProcesses.size} paused=${this._paused}`);
 
-            if (_debugIpc() && this._frameCounter % Math.max(1, fpsLimit) === 0) {
-                const f = this._audioEngine.getFeatures();
-                this._logger.info?.(
-                    `milkdrop audio debug: source=${f.source} active=${f.active} energy=${(f.energy ?? 0).toFixed(3)} bass=${(f.bass ?? 0).toFixed(3)} mid=${(f.mid ?? 0).toFixed(3)} high=${(f.high ?? 0).toFixed(3)}`
-                );
+                if (_debugIpc() && this._frameCounter % Math.max(1, fpsLimit) === 0) {
+                    const f = this._audioEngine.getFeatures();
+                    this._logger.info?.(
+                        `milkdrop audio debug: source=${f.source} active=${f.active} energy=${(f.energy ?? 0).toFixed(3)} bass=${(f.bass ?? 0).toFixed(3)} mid=${(f.mid ?? 0).toFixed(3)} high=${(f.high ?? 0).toFixed(3)} beat=${f.beat ?? 0}`
+                    );
+                }
+
+                for (const process of this._rendererProcesses.values()) {
+                    try {
+                        process.sendFrame(this._buildFrameState(process.monitorIndex, fpsLimit));
+                    } catch (error) {
+                        this._logger.warn?.(`milkdrop frame pump failed for process ${process.monitorIndex}: ${error.message}`);
+                    }
+                }
+
+                perfEnd(pumpToken);
+            } catch (outerError) {
+                this._logger.warn?.(`milkdrop frame pump critical error: ${outerError.message}`);
             }
-
-            for (const process of this._rendererProcesses.values())
-                process.sendFrame(this._buildFrameState(process.monitorIndex, fpsLimit));
-
-            perfEnd(pumpToken);
 
             return GLib.SOURCE_CONTINUE;
         });
@@ -828,7 +900,7 @@ export class MonitorManager {
             this._presetRotationId = 0;
         }
 
-        const intervalSec = this._settings.get_int('preset-rotation-interval');
+        const intervalSec = this._getIntSetting('preset-rotation-interval', 60);
         if (intervalSec <= 0)
             return;
 
@@ -846,14 +918,16 @@ export class MonitorManager {
     async _rotatePreset() {
         try {
             const index = await this._presetStore.loadIndex();
-            if (index.length <= 1)
+            if (!this._enabled || index.length <= 1)
                 return;
 
             const nextPresetId = this._selectNextPresetId(index);
-            if (!nextPresetId)
+            if (!this._enabled || !nextPresetId)
                 return;
 
             const preset = await this._presetStore.loadPreset(nextPresetId);
+            if (!this._enabled)
+                return;
             this._applyPreset(preset, 'rotated');
         } catch (error) {
             this._logger.debug?.(`milkdrop preset rotation failed: ${error.message}`);
@@ -882,14 +956,18 @@ export class MonitorManager {
     }
 
     _applyPreset(preset, reason = 'updated') {
-        this._currentPreset = preset;
-        const blendTime = Math.max(0, this._settings.get_double('blend-time'));
-        this._evaluator.loadPreset(preset, blendTime);
+        try {
+            this._currentPreset = preset;
+            const blendTime = Math.max(0, this._getDoubleSetting('blend-time', 0));
+            this._evaluator.loadPreset(preset, blendTime);
 
-        for (const process of this._rendererProcesses.values())
-            process.queuePresetLoad(preset);
+            for (const process of this._rendererProcesses.values())
+                process.queuePresetLoad(preset);
 
-        this._logger.info?.(`milkdrop preset ${reason}: ${preset.name}`);
+            this._logger.info?.(`milkdrop [TEST] Loading preset ID: ${preset.id} - Name: ${preset.name} - Reason: ${reason}`);
+        } catch (error) {
+            this._logger.warn?.(`milkdrop failed to apply preset "${preset?.name ?? 'unknown'}": ${error.message}`);
+        }
     }
 
     async _handlePresetDirectoryChanged() {
@@ -922,21 +1000,21 @@ export class MonitorManager {
         if (!this._enabled || this._disabling)
             return;
 
-        const hideWhenMaximized = this._settings.get_boolean('hide-when-maximized');
-        const emptyDesktopOnly = this._settings.get_boolean('show-on-empty-desktop-only');
+        const hideWhenMaximized = this._getBooleanSetting('hide-when-maximized', false);
+        const emptyDesktopOnly = this._getBooleanSetting('show-on-empty-desktop-only', false);
         const pauseWhenFullscreen = this._getBooleanSetting('pause-when-fullscreen', false);
 
         let shouldPause = false;
 
         if (hideWhenMaximized) {
             const focusWindow = global.display.focus_window;
-            if (focusWindow && focusWindow.maximized_horizontally && focusWindow.maximized_vertically)
+            if (focusWindow && !_isDisposed(focusWindow) && focusWindow.maximized_horizontally && focusWindow.maximized_vertically)
                 shouldPause = true;
         }
 
         if (pauseWhenFullscreen && !shouldPause) {
             const focusWindow = global.display.focus_window;
-            if (focusWindow?.fullscreen)
+            if (focusWindow && !_isDisposed(focusWindow) && focusWindow.fullscreen)
                 shouldPause = true;
         }
 
@@ -987,11 +1065,14 @@ export class MonitorManager {
             high: Number(raw?.high ?? 0),
             beat: Number(raw?.beat ?? 0),
             decay: Number(raw?.decay ?? 0),
+            waveData: raw?.waveData || [],
+            pcmLeft: raw?.pcmLeft || [],
+            pcmRight: raw?.pcmRight || [],
         };
 
         // Beat-cut: trigger immediate preset rotation on beat if enabled
         // Cooldown is configurable for beat-cut behavior.
-        if (this._settings.get_boolean('beat-cuts-enabled') && evaluated.audio?.beat) {
+        if (this._getBooleanSetting('beat-cuts-enabled', false) && evaluated.audio?.beat) {
             const now = GLib.get_monotonic_time() / 1000000;
             const cooldown = Math.max(0, this._getDoubleSetting('beat-cut-cooldown-sec', DEFAULT_BEAT_CUT_COOLDOWN_SEC));
             if (now - this._lastBeatCutTime > cooldown) {
@@ -1007,9 +1088,7 @@ export class MonitorManager {
         if (this._disabling || !this._enabled || !window)
             return;
 
-        // Guard against re-entrant calls while a ManagedRendererWindow._refresh
-        // is in progress (e.g. if a window operation emits unmanaged+map signals).
-        if (_windowRefreshActive)
+        if (_windowRefreshActive || !this._enabled)
             return;
 
         const process = this._findRendererProcessForWindow(window);
@@ -1105,7 +1184,7 @@ export class MonitorManager {
     }
 
     _getBooleanSetting(key, fallback) {
-        if (!this._hasSettingKey(key))
+        if (!this._settings || !this._hasSettingKey(key))
             return fallback;
 
         try {
@@ -1115,8 +1194,19 @@ export class MonitorManager {
         }
     }
 
+    _getIntSetting(key, fallback) {
+        if (!this._settings || !this._hasSettingKey(key))
+            return fallback;
+
+        try {
+            return this._settings.get_int(key);
+        } catch (_error) {
+            return fallback;
+        }
+    }
+
     _getDoubleSetting(key, fallback) {
-        if (!this._hasSettingKey(key))
+        if (!this._settings || !this._hasSettingKey(key))
             return fallback;
 
         try {
@@ -1127,7 +1217,7 @@ export class MonitorManager {
     }
 
     _getStringSetting(key, fallback) {
-        if (!this._hasSettingKey(key))
+        if (!this._settings || !this._hasSettingKey(key))
             return fallback;
 
         try {
@@ -1137,7 +1227,20 @@ export class MonitorManager {
         }
     }
 
+    _getStrvSetting(key, fallback = []) {
+        if (!this._settings || !this._hasSettingKey(key))
+            return Array.isArray(fallback) ? fallback : [];
+
+        try {
+            return this._settings.get_strv(key) ?? fallback;
+        } catch (_error) {
+            return Array.isArray(fallback) ? fallback : [];
+        }
+    }
+
     _hasSettingKey(key) {
+        if (!this._settings)
+            return false;
         try {
             const schema = this._settings.settings_schema ?? this._settings.get_settings_schema?.();
             return Boolean(schema?.has_key?.(key));

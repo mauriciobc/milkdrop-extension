@@ -68,6 +68,127 @@ export function run(assert) {
         assert(out.presetName === 'Demo Wave', 'null preset presetName default');
     }
 
+    // expression path receives energy and attenuated bands
+    {
+        const e = new Evaluator();
+        e.loadPreset({
+            id: 'expr:audio-inputs',
+            name: 'Expr Audio Inputs',
+            baseVals: { zoom: 1, decay: 0.98 },
+            frame_eqs: 'zoom = 1 + energy; decay = bass_att;',
+        });
+
+        const derived = e.evaluateFrame({
+            t: 0,
+            frame: 1,
+            audio: { energy: 0.4, bass: 0.5, mid: 0.25, high: 0.1 },
+        });
+        assert(Math.abs(derived.zoom - 1.4) < 1e-9, 'expression path maps energy into context');
+        assert(Math.abs(derived.decay - 0.35) < 1e-9, 'expression path derives bass_att from bass when missing');
+
+        const explicit = e.evaluateFrame({
+            t: 0,
+            frame: 2,
+            audio: { energy: 0.4, bass: 0.5, bass_att: 0.9 },
+        });
+        assert(Math.abs(explicit.decay - 0.9) < 1e-9, 'expression path uses explicit bass_att when provided');
+    }
+
+    // expression path accepts treb alias and normalizes it to high in output audio.
+    {
+        const e = new Evaluator();
+        e.loadPreset({
+            id: 'expr:treb-alias',
+            name: 'Expr Treb Alias',
+            baseVals: { zoom: 1, decay: 0.98 },
+            frame_eqs: 'zoom = 1 + treb; decay = treb_att;',
+        });
+
+        const out = e.evaluateFrame({
+            t: 0,
+            frame: 1,
+            audio: { treb: 0.3 },
+        });
+
+        assert(Math.abs(out.zoom - 1.3) < 1e-9, 'expression path accepts treb as a high-band alias');
+        assert(Math.abs(out.decay - 0.21) < 1e-9, 'expression path derives treb_att from normalized high alias');
+        assert(out.audio.high === 0.3, 'evaluateFrame normalizes incoming treb to high in output audio');
+        assert(out.uniforms.high === 0.3, 'evaluateFrame uniforms expose normalized high value from treb alias');
+    }
+
+    // expression path exposes renderer-facing MilkDrop controls needed by downstream passes.
+    {
+        const e = new Evaluator();
+        e.loadPreset({
+            id: 'expr:renderer-contract',
+            name: 'Expr Renderer Contract',
+            baseVals: {
+                zoom: 1,
+                decay: 0.98,
+                wrap: 0,
+                wave_mode: 3,
+            },
+            frame_eqs: [
+                'cx = 0.33;',
+                'cy = 0.77;',
+                'sx = 1.2;',
+                'sy = 0.8;',
+                'zoomexp = 1.5;',
+                'warp = 0.42;',
+                'echo_zoom = 1.1;',
+                'echo_alpha = 0.25;',
+                'echo_orient = 2;',
+                'gamma = 1.3;',
+                'brighten = 1;',
+                'darken = 0;',
+                'solarize = 1;',
+                'invert = 0;',
+                'darken_center = 1;',
+                'ob_size = 0.02;',
+                'ib_size = 0.03;',
+                'mv_x = 14;',
+                'mv_y = 10;',
+                'mv_dx = 0.01;',
+                'mv_dy = -0.02;',
+                'mv_a = 0.7;',
+                'wave_a = 0.6;',
+                'wave_scale = 1.7;',
+                'wave_smoothing = 0.9;',
+                'wave_x = 0.45;',
+                'wave_y = 0.55;',
+                'wave_dots = 1;',
+                'wave_thick = 1;',
+                'additivewave = 1;',
+            ].join(' '),
+        });
+
+        const out = e.evaluateFrame({ t: 0, frame: 1, audio: {} });
+        assert(Math.abs(out.cx - 0.33) < 1e-9, 'evaluateFrame exposes cx for renderer contract');
+        assert(Math.abs(out.cy - 0.77) < 1e-9, 'evaluateFrame exposes cy for renderer contract');
+        assert(Math.abs(out.sx - 1.2) < 1e-9, 'evaluateFrame exposes sx for renderer contract');
+        assert(Math.abs(out.sy - 0.8) < 1e-9, 'evaluateFrame exposes sy for renderer contract');
+        assert(Math.abs(out.zoomexp - 1.5) < 1e-9, 'evaluateFrame exposes zoomexp for renderer contract');
+        assert(Math.abs(out.warp - 0.42) < 1e-9, 'evaluateFrame exposes warp for renderer contract');
+        assert(out.wrap === 0, 'evaluateFrame exposes wrap for renderer contract');
+        assert(Math.abs(out.echo_zoom - 1.1) < 1e-9, 'evaluateFrame exposes echo_zoom for renderer contract');
+        assert(Math.abs(out.echo_alpha - 0.25) < 1e-9, 'evaluateFrame exposes echo_alpha for renderer contract');
+        assert(out.echo_orient === 2, 'evaluateFrame exposes echo_orient for renderer contract');
+        assert(Math.abs(out.ob_size - 0.02) < 1e-9, 'evaluateFrame exposes outer border size for renderer contract');
+        assert(Math.abs(out.ib_size - 0.03) < 1e-9, 'evaluateFrame exposes inner border size for renderer contract');
+        assert(out.mv_x === 14 && out.mv_y === 10, 'evaluateFrame exposes motion vector grid params for renderer contract');
+        assert(Math.abs(out.mv_dx - 0.01) < 1e-9 && Math.abs(out.mv_dy + 0.02) < 1e-9,
+            'evaluateFrame exposes motion vector displacement for renderer contract');
+        assert(Math.abs(out.mv_a - 0.7) < 1e-9, 'evaluateFrame exposes motion vector alpha for renderer contract');
+        assert(out.wave_mode === 3, 'evaluateFrame exposes wave_mode for renderer contract');
+        assert(Math.abs(out.wave_a - 0.6) < 1e-9, 'evaluateFrame exposes wave_a for renderer contract');
+        assert(Math.abs(out.wave_scale - 1.7) < 1e-9, 'evaluateFrame exposes wave_scale for renderer contract');
+        assert(Math.abs(out.wave_smoothing - 0.9) < 1e-9, 'evaluateFrame exposes wave_smoothing for renderer contract');
+        assert(Math.abs(out.wave_x - 0.45) < 1e-9 && Math.abs(out.wave_y - 0.55) < 1e-9,
+            'evaluateFrame exposes wave origin for renderer contract');
+        assert(out.wave_dots === 1 && out.wave_thick === 1 && out.additivewave === 1,
+            'evaluateFrame exposes waveform draw flags for renderer contract');
+    }
+
     // blend: first frame after switch sets blendProgress in (0, 1), after duration blendProgress === 1
     {
         const e = new Evaluator();
@@ -129,6 +250,59 @@ export function run(assert) {
         e._blendDuration = 10;
         e._getBlendProgress(15);
         assert(e._blendFrom === null, '_getBlendProgress clears blend when elapsed >= duration');
+    }
+
+    // Expression-to-expression blending: verifies that _exprCtx is also blended
+    {
+        const e = new Evaluator();
+        const p1 = {
+            id: 'p1', name: 'P1',
+            baseVals: { zoom: 1.0 },
+            frame_eqs: 'zoom = 1.0;'
+        };
+        const p2 = {
+            id: 'p2', name: 'P2',
+            baseVals: { zoom: 2.0 },
+            frame_eqs: 'zoom = 2.0;'
+        };
+
+        e.loadPreset(p1);
+        e.evaluateFrame({ t: 0 }); // Capture p1's context
+
+        e.loadPreset(p2, 1.0); // 1s blend
+        e.evaluateFrame({ t: 10 }); // set blendStartTime = 10
+        const out = e.evaluateFrame({ t: 10.5 }); // half way
+
+        // At t=10.5, blendProgress = 0.5. smoothstep(0.5) = 0.5.
+        // zoom = 1.0 + (2.0 - 1.0) * 0.5 = 1.5
+        assert(Math.abs(out.zoom - 1.5) < 1e-6, 'expr-to-expr: top-level zoom is blended');
+        assert(Math.abs(out._exprCtx.zoom - 1.5) < 1e-6, 'expr-to-expr: _exprCtx.zoom is blended');
+    }
+
+    // Legacy-to-expression blending: verifies that prev values are captured from legacy and used in expr
+    {
+        const e = new Evaluator();
+        const pLegacy = {
+            id: 'plegacy', name: 'PLegacy',
+            frame: { zoom: { base: 3.0 } }
+        };
+        const pExpr = {
+            id: 'pexpr', name: 'PExpr',
+            baseVals: { zoom: 1.0 },
+            frame_eqs: 'zoom = 1.0;'
+        };
+
+        e.loadPreset(pLegacy);
+        e.evaluateFrame({ t: 0 }); // Capture legacy's context (zoom=3.0)
+
+        e.loadPreset(pExpr, 1.0);
+        e.evaluateFrame({ t: 20 }); // set blendStartTime = 20
+        const out = e.evaluateFrame({ t: 20.5 }); // half way
+
+        // At t=20.5, blendProgress = 0.5. smoothstep(0.5) = 0.5.
+        // zoom = 3.0 + (1.0 - 3.0) * 0.5 = 2.0
+        assert(Math.abs(out.zoom - 2.0) < 1e-6, 'legacy-to-expr: top-level zoom is blended');
+        assert(Math.abs(out._exprCtx.zoom - 2.0) < 1e-6, 'legacy-to-expr: _exprCtx.zoom is blended');
     }
 
     // destroy() clears state

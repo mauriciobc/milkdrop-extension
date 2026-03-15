@@ -127,6 +127,16 @@ function parseArgs(argv) {
     return options;
 }
 
+function resolvePresetVertexSource(preset) {
+    if (!preset || typeof preset !== 'object')
+        return null;
+
+    if (typeof preset.pixel_eqs === 'string' && preset.pixel_eqs.trim() !== '')
+        return preset.pixel_eqs;
+
+    return preset.vertex ?? null;
+}
+
 const MilkdropRendererApplication = GObject.registerClass(
 class MilkdropRendererApplication extends Gtk.Application {
     constructor(options) {
@@ -235,20 +245,36 @@ class MilkdropRendererApplication extends Gtk.Application {
                     this._statusDirty = true;
                 },
                 onPresetLoad: message => {
-                    this._currentPreset = message.preset ?? null;
-                    this._bridgeStatusText = this._currentPreset
-                        ? `preset loaded: ${this._currentPreset.name}`
-                        : 'preset cleared';
-                    glArea.loadPresetVertex(this._currentPreset?.vertex ?? null);
-                    glArea.loadPresetShaders(this._currentPreset?.shaders ?? null);
-                    this._ipcClient?.send({
-                        type: 'telemetry',
-                        source: 'renderer',
-                        stage: 'preset_load',
-                        level: 'info',
-                        ok: true,
-                        msg: this._currentPreset?.name ?? 'preset cleared',
-                    });
+                    const nextPreset = message.preset ?? null;
+                    const presetName = nextPreset?.name ?? 'preset cleared';
+                    const vertexSource = resolvePresetVertexSource(nextPreset);
+                    try {
+                        glArea.loadPresetVertex(vertexSource);
+                        glArea.loadPresetShaders(nextPreset?.shaders ?? null);
+                        this._currentPreset = nextPreset;
+                        this._bridgeStatusText = nextPreset
+                            ? `preset loaded: ${presetName}`
+                            : 'preset cleared';
+                        this._ipcClient?.send({
+                            type: 'telemetry',
+                            source: 'renderer',
+                            stage: 'preset_load',
+                            level: 'info',
+                            ok: true,
+                            msg: presetName,
+                        });
+                    } catch (error) {
+                        this._bridgeStatusText = `preset load failed: ${presetName}`;
+                        console.warn(`milkdrop [renderer] preset load failed (${presetName}): ${error.message}`);
+                        this._ipcClient?.send({
+                            type: 'telemetry',
+                            source: 'renderer',
+                            stage: 'preset_load',
+                            level: 'warn',
+                            ok: false,
+                            msg: `${presetName}: ${error.message}`,
+                        });
+                    }
                     this._statusDirty = true;
                 },
                 onMessage: message => {
@@ -418,7 +444,7 @@ class MilkdropRendererApplication extends Gtk.Application {
     }
 });
 
-export {parseArgs, MilkdropRendererApplication};
+export {parseArgs, resolvePresetVertexSource, MilkdropRendererApplication};
 
 /**
  * Benchmark mode: render N frames with synthetic data, print timing summary, exit.

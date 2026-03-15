@@ -31,6 +31,7 @@ export class IpcServer {
         this._writePending = false;
         this._pendingFrame = null;
         this.socketPath = buildSocketPath(monitorIndex);
+        this._serviceSignalId = 0;
         this._frameWriteCount = 0;
         this._sendDropLogged = false;
     }
@@ -51,7 +52,7 @@ export class IpcServer {
         this._unlinkSocket();
 
         this._service = new Gio.SocketService();
-        this._service.connect('incoming', (_service, connection) => {
+        this._serviceSignalId = this._service.connect('incoming', (_service, connection) => {
             if (!this._enabled || this._closing) {
                 try {
                     connection.close(null);
@@ -84,13 +85,39 @@ export class IpcServer {
 
         this._closing = true;
         this._enabled = false;
-        this.send({type: 'shutdown'});
-        this._closeConnection();
-        this._cancellable?.cancel();
-        this._service?.stop();
+        this._ready = false;
+
+        if (this._cancellable) {
+            try {
+                this._cancellable.cancel();
+            } catch (_e) {}
+            this._cancellable = null;
+        }
+
+        if (this._service && this._serviceSignalId) {
+            try {
+                this._service.disconnect(this._serviceSignalId);
+            } catch (_e) {}
+            this._serviceSignalId = 0;
+        }
+
+        try {
+            this._connection?.close(null);
+        } catch (_e) {}
+        try {
+            this._service?.stop();
+        } catch (_e) {}
+        try {
+            Gio.File.new_for_path(this.socketPath).delete(null);
+        } catch (_e) {}
+
+        this._writeQueue = [];
+        this._writePending = false;
+        this._pendingFrame = null;
+        this._input = null;
+        this._output = null;
+        this._connection = null;
         this._service = null;
-        this._unlinkSocket();
-        this._cancellable = null;
         this._closing = false;
     }
 
@@ -135,9 +162,11 @@ export class IpcServer {
         const bytes = new GLib.Bytes(encoder.encode(payload));
         const capturedOutput = this._output;
         capturedOutput.write_bytes_async(bytes, GLib.PRIORITY_DEFAULT, this._cancellable, (stream, result) => {
-            if (this._output !== capturedOutput)
-                return;
             this._writePending = false;
+            if (this._output !== capturedOutput) {
+                this._flushWriteQueue();
+                return;
+            }
             try {
                 if (!this._enabled || this._closing)
                     return;
@@ -165,8 +194,7 @@ export class IpcServer {
         this._writeQueue = [];
         this._writePending = false;
         this._pendingFrame = null;
-        if (_debugIpc())
-            this._logger.info?.(`milkdrop [ipc-server] client connected monitor=${this._monitorIndex}`);
+        this._logger.warn?.(`[GNOME Milkdrop] IPC client connected monitor=${this._monitorIndex}`);
         this._readControlMessage();
     }
 

@@ -12,6 +12,21 @@ const DEFAULT_COLUMNS = 48;
 const DEFAULT_ROWS = 36;
 const FLOATS_PER_VERTEX = 4; // posX, posY, u, v
 
+function numberOr(value, fallback) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+}
+
+function clamp01(value) {
+    return Math.max(0, Math.min(1, value));
+}
+
+function wrap01(value) {
+    if (value < 0 || value > 1)
+        return value - Math.floor(value);
+    return value;
+}
+
 /**
  * Build a flat Float32Array of triangle vertices for the warp mesh.
  *
@@ -77,39 +92,88 @@ export function createDefaultMesh(cols = DEFAULT_COLUMNS, rows = DEFAULT_ROWS) {
  * @param {Function|null} evalVertex - optional (u,v,frame)→[u',v'] evaluator
  */
 export function applyWarpToMesh(vertices, vertexCount, frame, evalVertex = null) {
-    const zoom = frame.zoom ?? 1.0;
-    const rot = frame.rot ?? 0.0;
-    const dx = frame.dx ?? 0.0;
-    const dy = frame.dy ?? 0.0;
-    const cosR = Math.cos(rot);
-    const sinR = Math.sin(rot);
+    const frameZoom = numberOr(frame.zoom, 1.0);
+    const frameRot = numberOr(frame.rot, 0.0);
+    const frameDx = numberOr(frame.dx, 0.0);
+    const frameDy = numberOr(frame.dy, 0.0);
+    const frameCx = numberOr(frame.cx, 0.5);
+    const frameCy = numberOr(frame.cy, 0.5);
+    const frameSx = numberOr(frame.sx, 1.0);
+    const frameSy = numberOr(frame.sy, 1.0);
+    const frameZoomExp = numberOr(frame.zoomexp, 1.0);
+    const frameWrap = numberOr(frame.wrap, 1.0);
 
     for (let i = 0; i < vertexCount; i++) {
         const base = i * FLOATS_PER_VERTEX;
         let u = vertices[base + 2];
         let v = vertices[base + 3];
 
+        let zoom = frameZoom;
+        let rot = frameRot;
+        let dx = frameDx;
+        let dy = frameDy;
+        let cx = frameCx;
+        let cy = frameCy;
+        let sx = frameSx;
+        let sy = frameSy;
+        let zoomexp = frameZoomExp;
+        let wrap = frameWrap;
+
         if (evalVertex) {
             const result = evalVertex(u, v, frame);
-            u = result[0];
-            v = result[1];
+            if (Array.isArray(result)) {
+                u = numberOr(result[0], u);
+                v = numberOr(result[1], v);
+            } else if (result && typeof result === 'object') {
+                if (result.u !== undefined || result.v !== undefined) {
+                    u = numberOr(result.u, u);
+                    v = numberOr(result.v, v);
+                } else {
+                    u += numberOr(result.dx, 0.0);
+                    v += numberOr(result.dy, 0.0);
+                }
+
+                zoom = numberOr(result.zoom, zoom);
+                rot = numberOr(result.rot, rot);
+                cx = numberOr(result.cx, cx);
+                cy = numberOr(result.cy, cy);
+                sx = numberOr(result.sx, sx);
+                sy = numberOr(result.sy, sy);
+                zoomexp = numberOr(result.zoomexp, zoomexp);
+                wrap = numberOr(result.wrap, wrap);
+            }
         }
 
-        // Centre UVs around (0.5, 0.5) for zoom and rotation
-        let cu = u - 0.5;
-        let cv = v - 0.5;
+        // Center around pivot, stretch, then apply zoom^zoomexp and rotation.
+        let cu = (u - cx) * sx;
+        let cv = (v - cy) * sy;
 
-        // Apply zoom (inward zoom means dividing)
-        cu /= zoom;
-        cv /= zoom;
+        const safeZoomBase = Math.max(Math.abs(zoom), 1e-6);
+        const zoomScaleCandidate = Math.pow(safeZoomBase, zoomexp);
+        const zoomScale = Number.isFinite(zoomScaleCandidate) && zoomScaleCandidate > 1e-6
+            ? zoomScaleCandidate
+            : 1e-6;
+
+        cu /= zoomScale;
+        cv /= zoomScale;
 
         // Apply rotation
+        const cosR = Math.cos(rot);
+        const sinR = Math.sin(rot);
         const ru = cu * cosR - cv * sinR;
         const rv = cu * sinR + cv * cosR;
 
         // Translate and restore to [0,1]
-        const finalU = ru + 0.5 + dx;
-        const finalV = rv + 0.5 + dy;
+        let finalU = ru + cx + dx;
+        let finalV = rv + cy + dy;
+
+        if (wrap >= 0.5) {
+            finalU = wrap01(finalU);
+            finalV = wrap01(finalV);
+        } else {
+            finalU = clamp01(finalU);
+            finalV = clamp01(finalV);
+        }
 
         // Map UV back to clip space [-1, +1]
         vertices[base + 0] = finalU * 2 - 1;

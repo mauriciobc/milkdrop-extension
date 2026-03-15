@@ -1,7 +1,32 @@
 import GLib from 'gi://GLib';
-import {MilkdropRendererApplication, parseArgs} from '../../src/renderer/renderer.js';
+import {MilkdropRendererApplication, parseArgs, resolvePresetVertexSource} from '../../src/renderer/renderer.js';
 
 export function run(assert) {
+    // resolvePresetVertexSource prefers non-empty pixel_eqs over legacy vertex.
+    {
+        const source = resolvePresetVertexSource({
+            pixel_eqs: 'dx = 0.01;',
+            vertex: {warpAmount: 0.2, warpType: 'radial'},
+        });
+        assert(source === 'dx = 0.01;', 'resolvePresetVertexSource prefers pixel_eqs when non-empty');
+    }
+
+    // resolvePresetVertexSource falls back to vertex when pixel_eqs is empty.
+    {
+        const vertex = {warpAmount: 0.2, warpType: 'radial'};
+        const source = resolvePresetVertexSource({
+            pixel_eqs: '   ',
+            vertex,
+        });
+        assert(source === vertex, 'resolvePresetVertexSource falls back to vertex for empty pixel_eqs');
+    }
+
+    // resolvePresetVertexSource returns null when preset is missing.
+    {
+        const source = resolvePresetVertexSource(null);
+        assert(source === null, 'resolvePresetVertexSource returns null for null preset');
+    }
+
     // parseArgs ignores missing numeric values and preserves defaults.
     {
         const parsed = parseArgs(['--width', '--height', '--x']);

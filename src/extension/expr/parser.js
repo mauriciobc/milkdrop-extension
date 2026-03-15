@@ -122,6 +122,9 @@ export function parse(src) {
             }
             if (left.type === NodeType.CALL &&
                 (left.name === 'megabuf' || left.name === 'gmegabuf')) {
+                if (!Array.isArray(left.args) || left.args.length !== 1) {
+                    throw new Error(`megabuf/gmegabuf requires exactly one index argument`);
+                }
                 return { type: NodeType.MEMASSIGN, buf: left.name, index: left.args[0], value: expr(rbp) };
             }
             throw new Error('Assignment target must be identifier or megabuf/gmegabuf');

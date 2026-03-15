@@ -1,3 +1,6 @@
+import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
+
 import {PresetStore} from '../../src/extension/presets.js';
 
 export async function run(assert) {
@@ -8,6 +11,7 @@ export async function run(assert) {
         const ids = new Set(index.map(entry => entry.id));
         const expected = [
             'builtin:demo-wave',
+            'builtin:test-geiss-eggs',
             'builtin:angular-drift',
             'builtin:wave-pool',
             'builtin:fractal-bloom',
@@ -19,6 +23,15 @@ export async function run(assert) {
 
         for (const id of expected)
             assert(ids.has(id), `loadIndex includes ${id}`);
+    }
+
+    {
+        const preset = await store.loadPreset('builtin:test-geiss-eggs');
+        assert(preset.id === 'builtin:test-geiss-eggs', 'test-geiss-eggs preset has correct id');
+        assert(typeof preset.frame_eqs === 'string' && preset.frame_eqs.length > 0,
+            'test-geiss-eggs exposes frame_eqs for expression evaluation');
+        assert(typeof preset.pixel_eqs === 'string' && preset.pixel_eqs.length > 0,
+            'test-geiss-eggs exposes pixel_eqs for expression evaluation');
     }
 
     {
@@ -53,6 +66,50 @@ export async function run(assert) {
         first.frame.zoom.base = 999;
         const second = await store.loadPreset('builtin:supernova-kick');
         assert(second.frame.zoom.base !== 999, 'loadPreset returns a clone and does not leak mutations');
+    }
+
+    {
+        const tempDir = GLib.dir_make_tmp('milkdrop-expr-presets-XXXXXX');
+        const presetPath = GLib.build_filenamev([tempDir, 'expr-eel.json']);
+        const exprPreset = {
+            name: 'External Expr EEL',
+            description: 'Expression preset loaded from file',
+            baseVals: { zoom: 1.01, rot: 0.02 },
+            init_eqs_eel: 'q1 = 1;',
+            frame_eqs_eel: 'zoom = zoom + energy * 0.1;',
+            pixel_eqs_eel: 'dx = rad * 0.01;',
+        };
+
+        GLib.file_set_contents(presetPath, JSON.stringify(exprPreset));
+
+        const settings = {
+            settings_schema: {
+                has_key: key => key === 'preset-directory',
+            },
+            get_string: () => tempDir,
+        };
+
+        try {
+            const externalStore = new PresetStore({settings});
+            const loaded = await externalStore.loadPreset('file:expr-eel.json');
+            assert(loaded.source === 'file', 'external expression preset keeps source=file');
+            assert(loaded.init_eqs === 'q1 = 1;', 'external expression preset maps init_eqs_eel');
+            assert(loaded.frame_eqs === 'zoom = zoom + energy * 0.1;', 'external expression preset maps frame_eqs_eel');
+            assert(loaded.pixel_eqs === 'dx = rad * 0.01;', 'external expression preset maps pixel_eqs_eel');
+            assert(loaded.baseVals.zoom === 1.01, 'external expression preset keeps baseVals');
+            assert(loaded.vertex === null, 'external expression preset leaves vertex null when unspecified');
+        } finally {
+            const presetFile = Gio.File.new_for_path(presetPath);
+            const dirFile = Gio.File.new_for_path(tempDir);
+            try {
+                presetFile.delete(null);
+            } catch (_error) {
+            }
+            try {
+                dirFile.delete(null);
+            } catch (_error) {
+            }
+        }
     }
 
     {
@@ -106,6 +163,6 @@ export async function run(assert) {
         });
 
         const index = await guardedStore.loadIndex();
-        assert(index.length >= 8, 'missing preset-directory key falls back to built-in index without throwing');
+        assert(index.length >= 9, 'missing preset-directory key falls back to built-in index without throwing');
     }
 }

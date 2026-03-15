@@ -68,4 +68,137 @@ export function run(assert) {
         const expectedX = (uNew * 2 - 1);
         assert(Math.abs(posX - expectedX) < 1e-5, 'applyWarpToMesh uses evalVertex UV for position');
     }
+
+    // applyWarpToMesh uses cx/cy as transform pivot.
+    {
+        const a = new Float32Array([0, 0, 0.5, 0.0]);
+        applyWarpToMesh(a, 1, {
+            zoom: 1,
+            zoomexp: 1,
+            rot: Math.PI / 2,
+            dx: 0,
+            dy: 0,
+            cx: 0.5,
+            cy: 0.5,
+            sx: 1,
+            sy: 1,
+            wrap: 1,
+        });
+
+        const b = new Float32Array([0, 0, 0.5, 0.0]);
+        applyWarpToMesh(b, 1, {
+            zoom: 1,
+            zoomexp: 1,
+            rot: Math.PI / 2,
+            dx: 0,
+            dy: 0,
+            cx: 0.0,
+            cy: 0.0,
+            sx: 1,
+            sy: 1,
+            wrap: 1,
+        });
+
+        assert(Math.abs(a[0] - 1.0) < 1e-5, 'pivot at center rotates (0.5,0.0) to clip x=1.0');
+        assert(Math.abs(b[0] + 1.0) < 1e-5, 'pivot at origin rotates (0.5,0.0) to clip x=-1.0');
+    }
+
+    // applyWarpToMesh uses sx/sy stretch around pivot.
+    {
+        const vertices = new Float32Array([0, 0, 0.75, 0.5]);
+        applyWarpToMesh(vertices, 1, {
+            zoom: 1,
+            zoomexp: 1,
+            rot: 0,
+            dx: 0,
+            dy: 0,
+            cx: 0.5,
+            cy: 0.5,
+            sx: 2,
+            sy: 1,
+            wrap: 1,
+        });
+        assert(Math.abs(vertices[0] - 1.0) < 1e-5, 'sx stretches x away from pivot');
+    }
+
+    // applyWarpToMesh uses zoomexp to alter zoom response.
+    {
+        const vertices = new Float32Array([0, 0, 0.0, 0.0]);
+        applyWarpToMesh(vertices, 1, {
+            zoom: 2,
+            zoomexp: 2,
+            rot: 0,
+            dx: 0,
+            dy: 0,
+            cx: 0.5,
+            cy: 0.5,
+            sx: 1,
+            sy: 1,
+            wrap: 1,
+        });
+        assert(Math.abs(vertices[0] + 0.25) < 1e-5, 'zoomexp=2 increases effective zoom attenuation');
+    }
+
+    // applyWarpToMesh respects wrap (0 clamps, 1 wraps).
+    {
+        const clamped = new Float32Array([0, 0, 1.0, 0.5]);
+        applyWarpToMesh(clamped, 1, {
+            zoom: 1,
+            zoomexp: 1,
+            rot: 0,
+            dx: 0.6,
+            dy: 0,
+            cx: 0.5,
+            cy: 0.5,
+            sx: 1,
+            sy: 1,
+            wrap: 0,
+        });
+        assert(Math.abs(clamped[0] - 1.0) < 1e-5, 'wrap=0 clamps UV to edge');
+
+        const wrapped = new Float32Array([0, 0, 1.0, 0.5]);
+        applyWarpToMesh(wrapped, 1, {
+            zoom: 1,
+            zoomexp: 1,
+            rot: 0,
+            dx: 0.6,
+            dy: 0,
+            cx: 0.5,
+            cy: 0.5,
+            sx: 1,
+            sy: 1,
+            wrap: 1,
+        });
+        assert(Math.abs(wrapped[0] - 0.2) < 1e-5, 'wrap=1 wraps UV via fract');
+    }
+
+    // applyWarpToMesh uses per-pixel overrides beyond dx/dy when evalVertex returns an object.
+    {
+        const vertices = new Float32Array([0, 0, 0.0, 0.0]);
+        applyWarpToMesh(vertices, 1, {
+            zoom: 1,
+            zoomexp: 1,
+            rot: 0,
+            dx: 0,
+            dy: 0,
+            cx: 0.5,
+            cy: 0.5,
+            sx: 1,
+            sy: 1,
+            wrap: 1,
+        }, () => ({
+            dx: 0,
+            dy: 0,
+            zoom: 2,
+            zoomexp: 1,
+            cx: 0.5,
+            cy: 0.5,
+            sx: 1,
+            sy: 1,
+            rot: 0,
+            wrap: 1,
+        }));
+        assert(Math.abs(vertices[0] + 0.5) < 1e-5,
+            'per-pixel zoom override changes mesh transform even without UV displacement');
+    }
 }

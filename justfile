@@ -46,6 +46,12 @@ bench:
     @echo "── Renderer benchmark ──"
     @echo "Run: gjs -m src/renderer/renderer.js --benchmark --standalone --width 1280 --height 720"
 
+visual-expr preset="0":
+    gjs -m tests/visual-expr.js --preset {{preset}}
+
+compliance preset="0":
+    gjs -m tests/visual-compliance.js --preset {{preset}}
+
 bench-json:
     gjs -m tests/bench/run.js -- --json
 

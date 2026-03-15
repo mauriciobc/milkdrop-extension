@@ -1,5 +1,6 @@
 import GLib from 'gi://GLib';
 import Gst from 'gi://Gst?version=1.0';
+import GstApp from 'gi://GstApp?version=1.0';
 
 const SPECTRUM_THRESHOLD_DB = -80;
 const FEATURE_DECAY = 0.82;
@@ -10,7 +11,6 @@ const BEAT_HISTORY_MS = 1000;
 const BEAT_COOLDOWN_MS = 100;
 const BEAT_WARMUP_FRAMES = 5;
 // History size and cooldown are derived from SPECTRUM_INTERVAL_NS so wall-clock behaviour is stable if the interval changes.
-// Beat detection operates in linear amplitude space (not dB-normalized) so
 // transients that are significant in real amplitude trigger reliably.
 const BEAT_NOISE_FLOOR = 0.001;
 const BEAT_THRESHOLD_LOW = 1.2;
@@ -26,9 +26,7 @@ const RESTART_WINDOW_USEC = 15_000_000;
 const RESTART_DELAY_MSEC = 400;
 const DEFAULT_SOURCE_REPROBE_DELAY_MSEC = 2500;
 const MIN_SOURCE_REPROBE_DELAY_MSEC = 250;
-const REGEX_FALLBACK_LOG_INTERVAL = 120;
 const PARSER_ERROR_LOG_INTERVAL = 120;
-const MAGNITUDE_REGEX = /magnitude=\((?:float|double)\)\{([^}]*)\}/;
 
 let gstInitialized = false;
 
@@ -105,14 +103,12 @@ export class AudioEngine {
         this._spectrumCount = 0;
         this._spectrumEmptyCount = 0;
         this._lastSnapshotUsec = 0;
-        this._spectrumParserMode = 'auto';
-        this._regexFallbackCount = 0;
-        this._fallbackNoticeKey = null;
         this._parserErrorCount = 0;
         this._variantErrorCount = 0;
         this._features = this._buildDefaultFeatures('stub', false);
         this._noSpectrumWarnId = 0;
         this._loggedNonSpectrumElement = false;
+        this._appsinkPollId = 0;
         this._energyHistory = new Array(BEAT_HISTORY_SIZE).fill(0);
         this._bassHistory = new Array(BEAT_HISTORY_SIZE).fill(0);
         this._historyCount = 0;
@@ -134,12 +130,13 @@ export class AudioEngine {
         this._spectrumCount = 0;
         this._spectrumEmptyCount = 0;
         this._lastSnapshotUsec = 0;
-        this._spectrumParserMode = 'auto';
-        this._regexFallbackCount = 0;
-        this._fallbackNoticeKey = null;
         this._resetBeatHistory();
         this._stopPipeline();
         this._features = this._buildDefaultFeatures(this._features.source, false);
+    }
+
+    get enabled() {
+        return this._enabled;
     }
 
     getFeatures() {
@@ -161,8 +158,15 @@ export class AudioEngine {
             bass: clamp01(features.bass * sensitivity),
             mid: clamp01(features.mid * sensitivity),
             high: clamp01(features.high * sensitivity),
+            treb: clamp01(features.high * sensitivity),
+            bass_att: clamp01(features.bass * sensitivity * 0.7),
+            mid_att: clamp01(features.mid * sensitivity * 0.7),
+            treb_att: clamp01(features.high * sensitivity * 0.7),
             beat: clamp01(features.beat),
             decay: clamp01(features.decay * sensitivity),
+            waveData: features.waveData || [],
+            pcmLeft: features.pcmLeft || [],
+            pcmRight: features.pcmRight || [],
         };
     }
 
@@ -198,6 +202,10 @@ export class AudioEngine {
 
                 this._pipeline = pipeline;
                 this._bus = pipeline.get_bus();
+                this._appsink = pipeline.get_by_name('waveform_appsink');
+                if (this._appsink) {
+                    this._startAppsinkPoll();
+                }
                 this._loggedNonSpectrumElement = false;
                 this._activeSourceName = candidate.source;
                 this._features = {
@@ -339,12 +347,41 @@ export class AudioEngine {
         this._busSignalWatchEnabled = false;
     }
 
+    _startAppsinkPoll() {
+        this._stopAppsinkPoll();
+        if (!this._appsink || !this._enabled)
+            return;
+
+        const pollIntervalMs = 20;
+        this._appsinkPollId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, pollIntervalMs, () => {
+            if (!this._enabled || !this._appsink) {
+                this._appsinkPollId = 0;
+                return GLib.SOURCE_REMOVE;
+            }
+
+            // Safe main-thread, non-blocking pull
+            const sample = this._appsink.try_pull_sample(0);
+            if (sample)
+                this._processAppsinkSample(sample);
+
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
+    _stopAppsinkPoll() {
+        if (this._appsinkPollId) {
+            GLib.source_remove(this._appsinkPollId);
+            this._appsinkPollId = 0;
+        }
+    }
+
     _stopPipeline() {
         if (this._noSpectrumWarnId) {
             GLib.source_remove(this._noSpectrumWarnId);
             this._noSpectrumWarnId = 0;
             this._logger.warn?.('milkdrop audio: 2s spectrum timeout cancelled (pipeline stopping)');
         }
+        this._stopAppsinkPoll();
         this._detachBusListener();
 
         if (this._restartTimeoutId) {
@@ -359,12 +396,13 @@ export class AudioEngine {
 
         this._pipeline = null;
         this._bus = null;
+        this._appsink = null;
         this._lastUpdateUsec = 0;
         this._resetBeatHistory();
     }
 
     _buildPipelineDescription(sourceElement) {
-        return `${sourceElement} ! queue leaky=downstream max-size-buffers=2 ! audioconvert ! audioresample ! spectrum bands=${SPECTRUM_BANDS} threshold=${SPECTRUM_THRESHOLD_DB} post-messages=true interval=${SPECTRUM_INTERVAL_NS} ! fakesink sync=false`;
+        return `${sourceElement} ! queue leaky=downstream max-size-buffers=2 ! audioconvert ! audioresample ! tee name=t ! queue leaky=downstream max-size-buffers=2 ! spectrum bands=${SPECTRUM_BANDS} threshold=${SPECTRUM_THRESHOLD_DB} post-messages=true interval=${SPECTRUM_INTERVAL_NS} ! fakesink sync=false t. ! queue leaky=downstream max-size-buffers=2 ! audioconvert ! audioresample ! appsink name=waveform_appsink emit-signals=false sync=false max-buffers=2 drop=true`;
     }
 
     _getSourceBackendAvailability() {
@@ -535,6 +573,7 @@ export class AudioEngine {
             if (energyBeat || bassBeat) {
                 beat = 1;
                 this._beatCooldown = BEAT_COOLDOWN_FRAMES;
+                this._logger.info?.(`milkdrop beat detected #${this._spectrumCount} (energyBeat=${energyBeat} bassBeat=${bassBeat})`);
             }
             if (beatDebugEnabled)
                 beatDebug = { beatEnergy, beatBass, avgE, avgB, varE, varB, cvSqE, cvSqB, threshE, threshB, needE, needB, energyBeat, bassBeat, beat };
@@ -594,87 +633,124 @@ export class AudioEngine {
         }
     }
 
-    _parseSpectrumBands(structure) {
-        if (this._spectrumParserMode === 'structured') {
-            const bands = this._getMagnitudeFromStructure(structure) ?? [];
-            if (bands.length >= SPECTRUM_BANDS)
-                return bands;
-            const fromString = this._parseSpectrumBandsFromString(structure?.to_string?.() ?? '');
-            if (fromString.length >= SPECTRUM_BANDS) {
-                this._spectrumParserMode = 'regex-fallback';
-                this._logger.warn?.('milkdrop audio structured parser returned few bands; using regex parser');
-                this._recordRegexFallbackUse(true);
-                return fromString;
-            }
-            return bands;
-        }
-
-        if (this._spectrumParserMode === 'regex-fallback') {
-            const parsed = this._parseSpectrumBandsFromString(structure?.to_string?.() ?? '');
-            this._recordRegexFallbackUse(parsed.length > 0);
-            return parsed;
-        }
-
-        const fromStructure = this._getMagnitudeFromStructure(structure);
-        if (fromStructure && fromStructure.length >= SPECTRUM_BANDS) {
-            this._spectrumParserMode = 'structured';
-            return fromStructure;
-        }
-        if (fromStructure && fromStructure.length > 0) {
-            const fromString = this._parseSpectrumBandsFromString(structure?.to_string?.() ?? '');
-            if (fromString.length >= SPECTRUM_BANDS) {
-                this._spectrumParserMode = 'regex-fallback';
-                this._logger.warn?.('milkdrop audio structured parser returned few bands; using regex parser');
-                this._recordRegexFallbackUse(true);
-                return fromString;
-            }
-            this._spectrumParserMode = 'structured';
-            return fromStructure;
-        }
-
-        this._spectrumParserMode = 'regex-fallback';
-        this._logger.warn?.('milkdrop audio falling back to regex spectrum parser; performance may be reduced');
-        const parsed = this._parseSpectrumBandsFromString(structure?.to_string?.() ?? '');
-        this._recordRegexFallbackUse(parsed.length > 0);
-        return parsed;
-    }
-
-    _parseSpectrumBandsFromString(structureString) {
-        const match = MAGNITUDE_REGEX.exec(structureString);
-        if (!match)
-            return [];
-
-        const values = [];
-        const payload = match[1];
-        let start = 0;
-        for (let i = 0; i <= payload.length; i++) {
-            if (i !== payload.length && payload[i] !== ',')
-                continue;
-            const parsed = Number.parseFloat(payload.slice(start, i));
-            const normalized = normalizeDecibels(parsed, SPECTRUM_THRESHOLD_DB);
-            if (Number.isFinite(normalized))
-                values.push(normalized);
-            start = i + 1;
-        }
-        return values;
-    }
-
-    _recordRegexFallbackUse(hadBands) {
-        if (!hadBands)
+    _processAppsinkSample(sample) {
+        if (!this._enabled || !sample)
             return;
 
-        this._regexFallbackCount += 1;
-        if (this._regexFallbackCount === 1 || this._regexFallbackCount % REGEX_FALLBACK_LOG_INTERVAL === 0) {
-            this._logger.warn?.(
-                `milkdrop audio regex spectrum fallback active count=${this._regexFallbackCount}`
-            );
+        const buffer = sample.get_buffer();
+        if (!buffer)
+            return;
+
+        const [success, mapInfo] = buffer.map(Gst.MapFlags.READ);
+        if (!success)
+            return;
+
+        try {
+            const caps = sample.get_caps();
+            if (!caps)
+                return;
+
+            const structure = caps.get_structure(0);
+            if (!structure)
+                return;
+
+            const formatResult = structure.get_string('format');
+            const [okFormat, format] = Array.isArray(formatResult) ? formatResult : [formatResult !== null, formatResult];
+
+            const channelsResult = structure.get_int('channels');
+            const [okChannels, channels] = Array.isArray(channelsResult) ? channelsResult : [channelsResult !== null, channelsResult];
+
+            if (!okFormat || !okChannels)
+                return;
+
+            const isFloat = format === 'F32LE';
+            const isInt = format === 'S16LE';
+
+            if (!isFloat && !isInt)
+                return;
+
+            const bytesPerSample = isFloat ? 4 : 2;
+            const sampleCount = Math.floor(mapInfo.size / (bytesPerSample * channels));
+            if (sampleCount <= 0)
+                return;
+
+            // Zero-copy view of GStreamer buffer (support both ArrayBuffer and TypedArray bindings)
+            const rawBuffer = mapInfo.data.buffer ?? mapInfo.data;
+            const rawOffset = mapInfo.data.byteOffset ?? mapInfo.offset ?? 0;
+            const rawData = isFloat
+                ? new Float32Array(rawBuffer, rawOffset, mapInfo.size / 4)
+                : new Int16Array(rawBuffer, rawOffset, mapInfo.size / 2);
+
+            const numSamples = Math.floor(sampleCount);
+            const left = this._features.pcmLeft;
+            const right = this._features.pcmRight;
+
+            if (!(left instanceof Float32Array) || left.length !== 576 ||
+                !(right instanceof Float32Array) || right.length !== 576)
+                return;
+
+            for (let i = 0; i < 576; i++) {
+                const srcIdx = Math.floor((i * numSamples) / 576);
+                if (srcIdx < numSamples) {
+                    const lVal = rawData[srcIdx * channels];
+                    const rVal = (channels >= 2) ? rawData[srcIdx * channels + 1] : lVal;
+                    left[i] = isFloat ? lVal : (lVal / 32768.0);
+                    right[i] = isFloat ? rVal : (rVal / 32768.0);
+                }
+            }
+        } finally {
+            buffer.unmap(mapInfo);
         }
+    }
+
+    _parseSpectrumBands(structure) {
+        return this._getMagnitudeFromStructure(structure) ?? [];
     }
 
     _getMagnitudeFromStructure(structure) {
         try {
+            if (typeof structure.get_list === 'function') {
+                const listResult = structure.get_list('magnitude');
+                if (listResult && listResult[0] === true) {
+                    const valArray = listResult[1];
+                    if (valArray && valArray.n_values > 0) {
+                        const channelBands = [];
+                        // Check if it's a nested array (multi-channel) or flat (single channel / merged)
+                        const first = valArray.get_nth(0);
+                        if (first && typeof first.get_nth === 'function') {
+                            // Multi-channel (nested ValueArrays)
+                            for (let i = 0; i < valArray.n_values; i++) {
+                                const chArray = valArray.get_nth(i);
+                                const vals = this._extractFloatsFromValueArray(chArray);
+                                if (vals.length > 0)
+                                    channelBands.push(vals);
+                            }
+                        } else {
+                            // Single channel / merged (flat ValueArray)
+                            const vals = this._extractFloatsFromValueArray(valArray);
+                            if (vals.length > 0)
+                                channelBands.push(vals);
+                        }
+
+                        if (channelBands.length === 0)
+                            return null;
+                        
+                        const isMultiChannel = channelBands.length > 1 && channelBands.some(values => values.length > 1);
+                        if (isMultiChannel)
+                            return this._mergeChannelBands(channelBands);
+                        if (channelBands.length > 1)
+                            return channelBands.map(values => normalizeDecibels(values[0], SPECTRUM_THRESHOLD_DB)).filter(Number.isFinite);
+                        return channelBands[0].map(v => normalizeDecibels(v, SPECTRUM_THRESHOLD_DB)).filter(Number.isFinite);
+                    }
+                }
+            }
+
+            // Fallback to get_array for older/different GJS environments
             if (typeof structure.get_array === 'function') {
-                const arr = structure.get_array('magnitude');
+                let arr = structure.get_array('magnitude');
+                if (Array.isArray(arr) && arr.length === 2 && typeof arr[0] === 'boolean')
+                    arr = arr[0] ? arr[1] : null;
+
                 if (!arr || arr.length === 0)
                     return null;
                 const channelBands = Array.from(arr)
@@ -711,6 +787,24 @@ export class AudioEngine {
                 this._logger.debug?.(`milkdrop audio structured parser error #${this._parserErrorCount}: ${error.message}`);
         }
         return null;
+    }
+
+    _extractFloatsFromValueArray(valArray) {
+        const out = [];
+        try {
+            if (valArray && valArray.n_values > 0) {
+                for (let i = 0; i < valArray.n_values; i++) {
+                    const v = Number(valArray.get_nth(i));
+                    if (Number.isFinite(v))
+                        out.push(v);
+                }
+            }
+        } catch (error) {
+            this._variantErrorCount += 1;
+            if (this._variantErrorCount === 1 || this._variantErrorCount % PARSER_ERROR_LOG_INTERVAL === 0)
+                this._logger.debug?.(`milkdrop audio value_array parser error #${this._variantErrorCount}: ${error.message}`);
+        }
+        return out;
     }
 
     _extractFloatsFromVariant(variant) {
@@ -777,8 +871,11 @@ export class AudioEngine {
             return 0;
 
         let sum = 0;
-        for (let i = 0; i < this._historyCount; i++)
-            sum += history[i];
+        const base = (this._historyWriteIndex - this._historyCount + BEAT_HISTORY_SIZE) % BEAT_HISTORY_SIZE;
+        for (let i = 0; i < this._historyCount; i++) {
+            const idx = (base + i) % BEAT_HISTORY_SIZE;
+            sum += history[idx];
+        }
         return sum / this._historyCount;
     }
 
@@ -787,8 +884,10 @@ export class AudioEngine {
             return 0;
 
         let sum = 0;
+        const base = (this._historyWriteIndex - this._historyCount + BEAT_HISTORY_SIZE) % BEAT_HISTORY_SIZE;
         for (let i = 0; i < this._historyCount; i++) {
-            const delta = history[i] - mean;
+            const idx = (base + i) % BEAT_HISTORY_SIZE;
+            const delta = history[idx] - mean;
             sum += delta * delta;
         }
         return sum / this._historyCount;
@@ -868,6 +967,9 @@ export class AudioEngine {
             high: 0,
             beat: 0,
             decay: 0,
+            waveData: [],
+            pcmLeft: new Float32Array(576),
+            pcmRight: new Float32Array(576),
         };
     }
 

@@ -1,15 +1,16 @@
 /* eslint-disable no-invalid-this */
 
+import GObject from 'gi://GObject';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 
-import {InjectionManager} from 'resource:///org/gnome/shell/extensions/extension.js';
+import { InjectionManager } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Background from 'resource:///org/gnome/shell/ui/background.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as Workspace from 'resource:///org/gnome/shell/ui/workspace.js';
 import * as WorkspaceThumbnail from 'resource:///org/gnome/shell/ui/workspaceThumbnail.js';
 
-import {LiveWallpaper, RENDERER_TITLE_PREFIX} from './wallpaper.js';
+import { LiveWallpaper, RENDERER_TITLE_PREFIX } from './wallpaper.js';
 
 /**
  * GnomeShellOverride injects the live wallpaper into every GNOME Shell
@@ -20,7 +21,7 @@ import {LiveWallpaper, RENDERER_TITLE_PREFIX} from './wallpaper.js';
  * Heavily inspired by gnome-ext-hanabi (jeffshee).
  */
 export class GnomeShellOverride {
-    constructor({logger = console} = {}) {
+    constructor({ logger = console } = {}) {
         this._logger = logger;
         this._injectionManager = new InjectionManager();
         this._wallpaperActors = new Set();
@@ -135,20 +136,36 @@ export class GnomeShellOverride {
     }
 
     _reloadBackgrounds() {
-        for (const actor of this._wallpaperActors)
-            actor.destroy();
+        // Snapshot to array — the 'destroy' signal callback mutates the set.
+        const actors = [...this._wallpaperActors];
         this._wallpaperActors.clear();
+        const isDisposed = obj => {
+            try {
+                return (GObject.Object.prototype.toString.call(obj).includes('DISPOSED'));
+            } catch (e) {
+                return true;
+            }
+        };
+
+        for (const actor of actors) {
+            try {
+                if (!isDisposed(actor))
+                    actor.destroy();
+            } catch (_e) {
+                // Actor already disposed
+            }
+        }
 
         // Recreate background actors so they pick up (or drop) our override.
         try {
             if (Main.layoutManager?._updateBackgrounds != null)
                 Main.layoutManager._updateBackgrounds();
-        } catch (_e) {}
+        } catch (_e) { }
 
         try {
             if (Main.screenShield?._dialog?._updateBackgrounds != null)
                 Main.screenShield._dialog._updateBackgrounds();
-        } catch (_e) {}
+        } catch (_e) { }
 
         this._refreshOverviewWorkspaces();
     }

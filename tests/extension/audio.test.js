@@ -13,6 +13,24 @@ function buildLogger(logs) {
 
 function makeStructuredSpectrum(values) {
     return {
+        get_list(name) {
+            if (name === 'magnitude') {
+                return [true, {
+                    n_values: values.length,
+                    get_nth: i => {
+                        const val = values[i];
+                        if (Array.isArray(val)) {
+                            return {
+                                n_values: val.length,
+                                get_nth: j => val[j],
+                            };
+                        }
+                        return val;
+                    },
+                }];
+            }
+            return [false, null];
+        },
         get_array(name) {
             if (name === 'magnitude')
                 return values;
@@ -24,19 +42,6 @@ function makeStructuredSpectrum(values) {
     };
 }
 
-function makeRegexOnlySpectrum(serialized) {
-    return {
-        get_array() {
-            return null;
-        },
-        get_value() {
-            return null;
-        },
-        to_string() {
-            return serialized;
-        },
-    };
-}
 
 function makeSpectrumMessage(structure) {
     return {
@@ -106,22 +111,28 @@ export function run(assert) {
         assert(engine._historyCount === boundedLength, 'history window stays bounded over time');
     }
 
-    // Structured parser mode stays locked and does not bounce to regex fallback.
+    // Structured parser returns expected band count and correct normalized values.
+    // Mirrors the band shape GStreamer's spectrum element emits: an array of dB
+    // magnitudes, each in [SPECTRUM_THRESHOLD_DB, 0]. Values at -80 are silence.
     {
-        const logs = [];
-        const engine = new AudioEngine({logger: buildLogger(logs)});
+        const engine = new AudioEngine({logger: buildLogger([])});
         const structured = makeStructuredSpectrum([-40.0, -20.0, -10.0]);
-        const regexOnly = makeRegexOnlySpectrum('magnitude=(float){-40.0,-20.0,-10.0}');
 
-        const first = engine._parseSpectrumBands(structured);
-        const second = engine._parseSpectrumBands(regexOnly);
+        const bands = engine._parseSpectrumBands(structured);
+        const epsilon = 1e-6;
 
-        assert(first.length === 3, 'structured spectrum parser returns expected band count');
-        assert(engine._spectrumParserMode === 'structured', 'structured parser locks parser mode to structured');
-        assert(second.length === 0, 'structured mode avoids regex fallback once capability is known');
+        assert(bands.length === 3, 'structured parser returns one band per magnitude element');
+        // -40 dB → normalizeDecibels(-40, -80) = clamp01((-40 - -80) / 80) = 0.5
+        assert(Math.abs(bands[0] - 0.5) <= epsilon, 'band at -40 dB normalizes to 0.5');
+        // -20 dB → 0.75
+        assert(Math.abs(bands[1] - 0.75) <= epsilon, 'band at -20 dB normalizes to 0.75');
+        // -10 dB → 0.875
+        assert(Math.abs(bands[2] - 0.875) <= epsilon, 'band at -10 dB normalizes to 0.875');
     }
 
-    // Structured parser averages channelized vectors into one value per band.
+    // Structured parser averages channelized (stereo) vectors into one value per band.
+    // GStreamer's spectrum element can emit per-channel magnitude arrays; the parser
+    // should average them into a single mono band array.
     {
         const engine = new AudioEngine({logger: buildLogger([])});
         const structured = makeStructuredSpectrum([[-40.0, -20.0, -10.0], [-30.0, -10.0, -30.0]]);
@@ -129,12 +140,15 @@ export function run(assert) {
         const epsilon = 1e-6;
 
         assert(bands.length === 3, 'structured parser flattens channelized spectrum to band count');
+        // Average of -40 and -30 = -35 dB → normalizeDecibels(-35, -80) = 45/80 = 0.5625
         assert(Math.abs(bands[0] - 0.5625) <= epsilon, 'band 0 matches normalized channel average for -35 dB');
+        // Average of -20 and -10 = -15 dB → 65/80 = 0.8125
         assert(Math.abs(bands[1] - 0.8125) <= epsilon, 'band 1 matches normalized channel average for -15 dB');
+        // Average of -10 and -30 = -20 dB → 60/80 = 0.75
         assert(Math.abs(bands[2] - 0.75) <= epsilon, 'band 2 matches normalized channel average for -20 dB');
     }
 
-    // Structured parser accepts a single nested channel vector shape.
+    // Structured parser accepts a single nested channel vector (mono GStreamer output).
     {
         const engine = new AudioEngine({logger: buildLogger([])});
         const structured = makeStructuredSpectrum([[-40.0, -20.0, -10.0]]);
@@ -143,29 +157,33 @@ export function run(assert) {
         assert(bands.length === 3, 'structured parser supports one nested vector of bands');
     }
 
-    // Regex fallback mode activates once and tracks usage.
+
+    // Full 24-band GStreamer spectrum: silence bands produce 0, non-silence bands
+    // are in (0, 1]. This validates the full pipeline that the real GStreamer
+    // spectrum element would exercise at runtime.
     {
-        const logs = [];
-        const engine = new AudioEngine({logger: buildLogger(logs)});
-        const regexOnly = makeRegexOnlySpectrum('magnitude=(double){-30.0,-20.0,-10.0}');
+        const engine = new AudioEngine({logger: buildLogger([])});
+        // Simulate a realistic GStreamer output: mostly silence (-80), with some
+        // bass energy in the lower bands.
+        const gstBands = [
+            -30, -25, -35, -45, // bass region
+            -55, -60, -65, -70, // low-mid
+            -75, -78, -80, -80, // mid fading to threshold
+            -80, -80, -80, -80, // silence
+            -80, -80, -80, -80,
+            -80, -80, -80, -80,
+        ];
+        const structured = makeStructuredSpectrum(gstBands);
+        const bands = engine._parseSpectrumBands(structured);
 
-        const first = engine._parseSpectrumBands(regexOnly);
-        const second = engine._parseSpectrumBands(regexOnly);
-
-        const fallbackWarned = logs.some(entry =>
-            entry.level === 'warn' &&
-            entry.message.includes('falling back to regex spectrum parser')
-        );
-        const usageWarned = logs.some(entry =>
-            entry.level === 'warn' &&
-            entry.message.includes('regex spectrum fallback active count=1')
-        );
-
-        assert(engine._spectrumParserMode === 'regex-fallback', 'regex parser fallback locks parser mode');
-        assert(first.length === 3 && second.length === 3, 'regex fallback parser keeps returning magnitude bands');
-        assert(engine._regexFallbackCount === 2, 'regex fallback usage counter increments per successful parse');
-        assert(fallbackWarned, 'regex fallback transition emits warning log');
-        assert(usageWarned, 'regex fallback usage emits warning log');
+        assert(bands.length === 24, 'parser returns all 24 bands for a full GStreamer spectrum');
+        assert(bands.every(v => v >= 0 && v <= 1), 'all normalized bands are in [0, 1]');
+        // Silence (-80 dB) must map to exactly 0
+        assert(bands[11] === 0 && bands[23] === 0, 'threshold-level bands normalize to 0 (silence)');
+        // Active bass bands must be strictly positive
+        assert(bands[0] > 0 && bands[1] > 0, 'active bass bands normalize to positive values');
+        // Frequency ordering: lower bands have more energy than upper silence bands
+        assert(bands[0] > bands[23], 'bass energy exceeds silence-floor upper bands');
     }
 
     // Bus listener prefers add_watch and keeps polling disabled.
@@ -456,9 +474,7 @@ export function run(assert) {
 
         // 24 bands at a steady -40 dB (normalized 0.5) for warmup
         const steadyBands = new Array(24).fill(-40.0);
-        const steadyMessage = makeSpectrumMessage(makeRegexOnlySpectrum(
-            `spectrum, magnitude=(float){${steadyBands.join(',')}}`
-        ));
+        const steadyMessage = makeSpectrumMessage(makeStructuredSpectrum(steadyBands));
         for (let i = 0; i < 10; i++)
             engine._handleSpectrumMessage(steadyMessage);
 
@@ -467,9 +483,7 @@ export function run(assert) {
 
         // Spike: 24 bands at -15 dB (normalized 0.8125) — a ~16x amplitude jump
         const spikeBands = new Array(24).fill(-15.0);
-        const spikeMessage = makeSpectrumMessage(makeRegexOnlySpectrum(
-            `spectrum, magnitude=(float){${spikeBands.join(',')}}`
-        ));
+        const spikeMessage = makeSpectrumMessage(makeStructuredSpectrum(spikeBands));
         engine._handleSpectrumMessage(spikeMessage);
 
         assert(engine._features.beat === 1, 'beat detection fires on loud transient after steady state');
@@ -481,16 +495,12 @@ export function run(assert) {
         engine._enabled = true;
 
         const steadyBands = new Array(24).fill(-40.0);
-        const steadyMessage = makeSpectrumMessage(makeRegexOnlySpectrum(
-            `spectrum, magnitude=(float){${steadyBands.join(',')}}`
-        ));
+        const steadyMessage = makeSpectrumMessage(makeStructuredSpectrum(steadyBands));
         for (let i = 0; i < 10; i++)
             engine._handleSpectrumMessage(steadyMessage);
 
         const spikeBands = new Array(24).fill(-15.0);
-        const spikeMessage = makeSpectrumMessage(makeRegexOnlySpectrum(
-            `spectrum, magnitude=(float){${spikeBands.join(',')}}`
-        ));
+        const spikeMessage = makeSpectrumMessage(makeStructuredSpectrum(spikeBands));
 
         engine._handleSpectrumMessage(spikeMessage);
         assert(engine._features.beat === 1, 'first spike triggers beat');
@@ -508,19 +518,81 @@ export function run(assert) {
 
         // Very quiet: -75 dB (normalized 0.0625, linear ~0.000018)
         const quietBands = new Array(24).fill(-75.0);
-        const quietMessage = makeSpectrumMessage(makeRegexOnlySpectrum(
-            `spectrum, magnitude=(float){${quietBands.join(',')}}`
-        ));
+        const quietMessage = makeSpectrumMessage(makeStructuredSpectrum(quietBands));
         for (let i = 0; i < 10; i++)
             engine._handleSpectrumMessage(quietMessage);
 
         // Spike relative to quiet floor
         const spikeBands = new Array(24).fill(-55.0);
-        const spikeMessage = makeSpectrumMessage(makeRegexOnlySpectrum(
-            `spectrum, magnitude=(float){${spikeBands.join(',')}}`
-        ));
+        const spikeMessage = makeSpectrumMessage(makeStructuredSpectrum(spikeBands));
         engine._handleSpectrumMessage(spikeMessage);
 
         assert(engine._features.beat === 0, 'spike below noise floor does not trigger beat');
+    }
+
+    // Public audio contract exposes treb alias and attenuated scaled bands.
+    {
+        const engine = new AudioEngine({
+            logger: buildLogger([]),
+            settings: {
+                settings_schema: {
+                    has_key: key => key === 'audio-sensitivity',
+                },
+                get_double: () => 0.5,
+            },
+        });
+
+        engine._enabled = true;
+        engine._lastUpdateUsec = GLib.get_monotonic_time();
+        engine._features = {
+            ...engine._features,
+            source: 'pulse:test',
+            active: true,
+            energy: 0.8,
+            bass: 0.9,
+            mid: 0.4,
+            high: 0.6,
+            beat: 1,
+            decay: 0.5,
+        };
+
+        const features = engine.getFeatures();
+        const epsilon = 1e-9;
+
+        assert(features.treb === features.high, 'getFeatures exposes treb as an alias of high');
+        assert(Math.abs(features.bass - 0.45) <= epsilon, 'getFeatures scales public bass with sensitivity');
+        assert(Math.abs(features.mid - 0.2) <= epsilon, 'getFeatures scales public mid with sensitivity');
+        assert(Math.abs(features.high - 0.3) <= epsilon, 'getFeatures scales public high with sensitivity');
+        assert(Math.abs(features.bass_att - (features.bass * 0.7)) <= epsilon,
+            'getFeatures derives bass_att from scaled bass');
+        assert(Math.abs(features.mid_att - (features.mid * 0.7)) <= epsilon,
+            'getFeatures derives mid_att from scaled mid');
+        assert(Math.abs(features.treb_att - (features.high * 0.7)) <= epsilon,
+            'getFeatures derives treb_att from scaled high');
+    }
+
+    // Public audio contract exposes waveform sample payload for renderer waveform pass.
+    {
+        const engine = new AudioEngine({logger: buildLogger([])});
+        engine._enabled = true;
+        engine._lastUpdateUsec = GLib.get_monotonic_time();
+        engine._features = {
+            ...engine._features,
+            source: 'pulse:test',
+            active: true,
+            energy: 0.5,
+            bass: 0.4,
+            mid: 0.3,
+            high: 0.2,
+            beat: 0,
+            decay: 0.1,
+            waveData: [0.0, 0.5, 1.0, 0.25],
+        };
+
+        const features = engine.getFeatures();
+        assert(Array.isArray(features.waveData), 'getFeatures exposes waveData payload');
+        assert(features.waveData.length === 4, 'getFeatures preserves waveData payload length');
+        assert(Math.abs(features.waveData[2] - 1.0) < 1e-9,
+            'getFeatures preserves waveData payload values');
     }
 }

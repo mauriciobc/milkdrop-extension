@@ -1,6 +1,8 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
+
+
 const VALID_WARP_TYPES = new Set(['radial', 'angular', 'wave']);
 const VALID_WAVEFORMS = new Set(['sin', 'cos']);
 
@@ -10,11 +12,11 @@ const BOOTSTRAP_PRESET = {
     description: 'Built-in time-driven preset used to bootstrap the renderer protocol.',
     source: 'builtin',
     frame: {
-        zoom: {base: 1.0, amplitude: 0.02, frequency: 0.5, monitorPhase: 0.2, waveform: 'sin', audioScale: 0.15},
-        rot: {base: 0.0, amplitude: 0.012, frequency: 0.25, monitorPhase: 0.15, waveform: 'sin', audioScale: 0.06},
-        dx: {base: 0.0, amplitude: 0.01, frequency: 0.3, waveform: 'sin', audioScale: 0.04},
-        dy: {base: 0.0, amplitude: 0.01, frequency: 0.2, waveform: 'cos', audioScale: 0.04},
-        decay: {base: 0.97, amplitude: 0.0, frequency: 0.0, waveform: 'sin'},
+        zoom: { base: 1.0, amplitude: 0.02, frequency: 0.5, monitorPhase: 0.2, waveform: 'sin', audioScale: 0.15 },
+        rot: { base: 0.0, amplitude: 0.012, frequency: 0.25, monitorPhase: 0.15, waveform: 'sin', audioScale: 0.06 },
+        dx: { base: 0.0, amplitude: 0.01, frequency: 0.3, waveform: 'sin', audioScale: 0.04 },
+        dy: { base: 0.0, amplitude: 0.01, frequency: 0.2, waveform: 'cos', audioScale: 0.04 },
+        decay: { base: 0.97, amplitude: 0.0, frequency: 0.0, waveform: 'sin' },
     },
     vertex: {
         warpAmount: 0.015,
@@ -74,16 +76,57 @@ void main() {
 const BUILTIN_PRESETS = [
     BOOTSTRAP_PRESET,
     {
+        id: 'builtin:test-geiss-eggs',
+        name: 'Test - Geiss Eggs (Compliance)',
+        description: 'Reference expression preset aligned with the visual compliance test pipeline.',
+        source: 'builtin',
+        baseVals: {
+            decay: 0.97,
+            wave_mode: 2,
+            wave_a: 3.5,
+            wave_scale: 2.72,
+            wave_smoothing: 0.77,
+            warpscale: 2.853,
+            zoom: 1.046,
+            rot: 0.02,
+            warp: 1.42,
+            wave_r: 0.6,
+            wave_g: 0.6,
+            wave_b: 0.6,
+            wave_y: 0.47,
+            cx: 0.5,
+            cy: 0.5,
+            dx: 0,
+            dy: 0,
+        },
+        init_eqs: '',
+        frame_eqs:
+            'wave_r = wave_r + 0.400*( 0.60*sin(0.900*time) + 0.40*sin(0.963*time) );\n' +
+            'wave_g = wave_g + 0.400*( 0.60*sin(0.900*time) + 0.40*sin(0.956*time) );\n' +
+            'wave_b = wave_b + 0.400*( 0.60*sin(0.910*time) + 0.40*sin(0.920*time) );\n' +
+            'zoom = zoom + 0.023*( 0.60*sin(0.339*time) + 0.40*sin(0.276*time) );\n' +
+            'rot = rot + 0.030*( 0.60*sin(0.381*time) + 0.40*sin(0.579*time) );\n' +
+            'cx = cx + 0.070*( 0.60*sin(0.374*time) + 0.40*sin(0.294*time) );\n' +
+            'cy = cy + 0.070*( 0.60*sin(0.393*time) + 0.40*sin(0.223*time) );',
+        pixel_eqs: 'zoom=zoom+0.27*sin(time*1.55+rad*5);',
+        vertex: {
+            warpAmount: 0.015,
+            warpSpeed: 0.8,
+            warpScale: 1.0,
+            warpType: 'radial',
+        },
+    },
+    {
         id: 'builtin:angular-drift',
         name: 'Angular Drift',
         description: 'Slow angular warp with audio-reactive rotation.',
         source: 'builtin',
         frame: {
-            zoom: {base: 1.01, amplitude: 0.01, frequency: 0.3, waveform: 'sin', audioScale: 0.02},
-            rot: {base: 0.005, amplitude: 0.015, frequency: 0.15, waveform: 'cos', audioScale: 0.04},
-            dx: {base: 0.0, amplitude: 0.005, frequency: 0.2, waveform: 'sin'},
-            dy: {base: 0.0, amplitude: 0.005, frequency: 0.15, waveform: 'cos'},
-            decay: {base: 0.97, amplitude: 0.0, frequency: 0.0, waveform: 'sin'},
+            zoom: { base: 1.01, amplitude: 0.01, frequency: 0.3, waveform: 'sin', audioScale: 0.02 },
+            rot: { base: 0.005, amplitude: 0.015, frequency: 0.15, waveform: 'cos', audioScale: 0.04 },
+            dx: { base: 0.0, amplitude: 0.005, frequency: 0.2, waveform: 'sin' },
+            dy: { base: 0.0, amplitude: 0.005, frequency: 0.15, waveform: 'cos' },
+            decay: { base: 0.97, amplitude: 0.0, frequency: 0.0, waveform: 'sin' },
         },
         vertex: {
             warpAmount: 0.02,
@@ -98,11 +141,11 @@ const BUILTIN_PRESETS = [
         description: 'Flowing wave distortion driven by bass.',
         source: 'builtin',
         frame: {
-            zoom: {base: 1.0, amplitude: 0.015, frequency: 0.4, waveform: 'sin', audioScale: 0.04},
-            rot: {base: 0.0, amplitude: 0.008, frequency: 0.2, waveform: 'sin', audioScale: 0.01},
-            dx: {base: 0.0, amplitude: 0.015, frequency: 0.35, waveform: 'cos', audioScale: 0.02},
-            dy: {base: 0.0, amplitude: 0.012, frequency: 0.25, waveform: 'sin', audioScale: 0.02},
-            decay: {base: 0.96, amplitude: 0.01, frequency: 0.1, waveform: 'sin'},
+            zoom: { base: 1.0, amplitude: 0.015, frequency: 0.4, waveform: 'sin', audioScale: 0.04 },
+            rot: { base: 0.0, amplitude: 0.008, frequency: 0.2, waveform: 'sin', audioScale: 0.01 },
+            dx: { base: 0.0, amplitude: 0.015, frequency: 0.35, waveform: 'cos', audioScale: 0.02 },
+            dy: { base: 0.0, amplitude: 0.012, frequency: 0.25, waveform: 'sin', audioScale: 0.02 },
+            decay: { base: 0.96, amplitude: 0.01, frequency: 0.1, waveform: 'sin' },
         },
         vertex: {
             warpAmount: 0.025,
@@ -117,11 +160,11 @@ const BUILTIN_PRESETS = [
         description: 'Web-inspired fractal pulse with smooth radial bloom.',
         source: 'builtin',
         frame: {
-            zoom: {base: 1.015, amplitude: 0.02, frequency: 0.21, waveform: 'sin', audioScale: 0.05},
-            rot: {base: 0.0015, amplitude: 0.018, frequency: 0.17, waveform: 'cos', audioScale: 0.05},
-            dx: {base: 0.0, amplitude: 0.008, frequency: 0.24, waveform: 'sin', audioScale: 0.02},
-            dy: {base: 0.0, amplitude: 0.01, frequency: 0.2, waveform: 'cos', audioScale: 0.03},
-            decay: {base: 0.965, amplitude: 0.006, frequency: 0.08, waveform: 'sin'},
+            zoom: { base: 1.015, amplitude: 0.02, frequency: 0.21, waveform: 'sin', audioScale: 0.05 },
+            rot: { base: 0.0015, amplitude: 0.018, frequency: 0.17, waveform: 'cos', audioScale: 0.05 },
+            dx: { base: 0.0, amplitude: 0.008, frequency: 0.24, waveform: 'sin', audioScale: 0.02 },
+            dy: { base: 0.0, amplitude: 0.01, frequency: 0.2, waveform: 'cos', audioScale: 0.03 },
+            decay: { base: 0.965, amplitude: 0.006, frequency: 0.08, waveform: 'sin' },
         },
         vertex: {
             warpAmount: 0.028,
@@ -136,11 +179,11 @@ const BUILTIN_PRESETS = [
         description: 'Hypnotic category inspired tunnel with rotational pull.',
         source: 'builtin',
         frame: {
-            zoom: {base: 1.03, amplitude: 0.016, frequency: 0.3, waveform: 'sin', audioScale: 0.07},
-            rot: {base: 0.008, amplitude: 0.02, frequency: 0.22, waveform: 'sin', audioScale: 0.04},
-            dx: {base: 0.0, amplitude: 0.004, frequency: 0.12, waveform: 'cos'},
-            dy: {base: 0.0, amplitude: 0.004, frequency: 0.14, waveform: 'sin'},
-            decay: {base: 0.958, amplitude: 0.004, frequency: 0.09, waveform: 'cos'},
+            zoom: { base: 1.03, amplitude: 0.016, frequency: 0.3, waveform: 'sin', audioScale: 0.07 },
+            rot: { base: 0.008, amplitude: 0.02, frequency: 0.22, waveform: 'sin', audioScale: 0.04 },
+            dx: { base: 0.0, amplitude: 0.004, frequency: 0.12, waveform: 'cos' },
+            dy: { base: 0.0, amplitude: 0.004, frequency: 0.14, waveform: 'sin' },
+            decay: { base: 0.958, amplitude: 0.004, frequency: 0.09, waveform: 'cos' },
         },
         vertex: {
             warpAmount: 0.03,
@@ -193,11 +236,11 @@ void main() {
         description: 'Particles-inspired streaks with bright audio-driven tails.',
         source: 'builtin',
         frame: {
-            zoom: {base: 1.0, amplitude: 0.018, frequency: 0.42, waveform: 'cos', audioScale: 0.05},
-            rot: {base: 0.0, amplitude: 0.012, frequency: 0.35, waveform: 'sin', audioScale: 0.03},
-            dx: {base: 0.0, amplitude: 0.018, frequency: 0.33, waveform: 'sin', audioScale: 0.04},
-            dy: {base: 0.0, amplitude: 0.014, frequency: 0.28, waveform: 'cos', audioScale: 0.04},
-            decay: {base: 0.962, amplitude: 0.012, frequency: 0.14, waveform: 'sin'},
+            zoom: { base: 1.0, amplitude: 0.018, frequency: 0.42, waveform: 'cos', audioScale: 0.05 },
+            rot: { base: 0.0, amplitude: 0.012, frequency: 0.35, waveform: 'sin', audioScale: 0.03 },
+            dx: { base: 0.0, amplitude: 0.018, frequency: 0.33, waveform: 'sin', audioScale: 0.04 },
+            dy: { base: 0.0, amplitude: 0.014, frequency: 0.28, waveform: 'cos', audioScale: 0.04 },
+            decay: { base: 0.962, amplitude: 0.012, frequency: 0.14, waveform: 'sin' },
         },
         vertex: {
             warpAmount: 0.02,
@@ -237,11 +280,11 @@ void main() {
         description: 'Supernova style burst that spikes with kick energy.',
         source: 'builtin',
         frame: {
-            zoom: {base: 1.02, amplitude: 0.022, frequency: 0.32, waveform: 'sin', audioScale: 0.09},
-            rot: {base: 0.002, amplitude: 0.018, frequency: 0.27, waveform: 'cos', audioScale: 0.03},
-            dx: {base: 0.0, amplitude: 0.009, frequency: 0.2, waveform: 'sin', audioScale: 0.04},
-            dy: {base: 0.0, amplitude: 0.009, frequency: 0.23, waveform: 'cos', audioScale: 0.04},
-            decay: {base: 0.952, amplitude: 0.008, frequency: 0.17, waveform: 'sin'},
+            zoom: { base: 1.02, amplitude: 0.022, frequency: 0.32, waveform: 'sin', audioScale: 0.09 },
+            rot: { base: 0.002, amplitude: 0.018, frequency: 0.27, waveform: 'cos', audioScale: 0.03 },
+            dx: { base: 0.0, amplitude: 0.009, frequency: 0.2, waveform: 'sin', audioScale: 0.04 },
+            dy: { base: 0.0, amplitude: 0.009, frequency: 0.23, waveform: 'cos', audioScale: 0.04 },
+            decay: { base: 0.952, amplitude: 0.008, frequency: 0.17, waveform: 'sin' },
         },
         vertex: {
             warpAmount: 0.033,
@@ -277,11 +320,11 @@ void main() {
         description: 'Waveform-inspired grid of oscillating audio ribbons.',
         source: 'builtin',
         frame: {
-            zoom: {base: 1.0, amplitude: 0.01, frequency: 0.5, waveform: 'sin', audioScale: 0.03},
-            rot: {base: 0.0, amplitude: 0.01, frequency: 0.41, waveform: 'cos', audioScale: 0.02},
-            dx: {base: 0.0, amplitude: 0.012, frequency: 0.48, waveform: 'sin', audioScale: 0.03},
-            dy: {base: 0.0, amplitude: 0.012, frequency: 0.46, waveform: 'cos', audioScale: 0.03},
-            decay: {base: 0.968, amplitude: 0.007, frequency: 0.12, waveform: 'cos'},
+            zoom: { base: 1.0, amplitude: 0.01, frequency: 0.5, waveform: 'sin', audioScale: 0.03 },
+            rot: { base: 0.0, amplitude: 0.01, frequency: 0.41, waveform: 'cos', audioScale: 0.02 },
+            dx: { base: 0.0, amplitude: 0.012, frequency: 0.48, waveform: 'sin', audioScale: 0.03 },
+            dy: { base: 0.0, amplitude: 0.012, frequency: 0.46, waveform: 'cos', audioScale: 0.03 },
+            decay: { base: 0.968, amplitude: 0.007, frequency: 0.12, waveform: 'cos' },
         },
         vertex: {
             warpAmount: 0.018,
@@ -333,9 +376,77 @@ function sanitiseWaveSpec(raw, fallback) {
     };
 }
 
-const DEFAULT_WAVE = {base: 0, amplitude: 0, frequency: 0, monitorPhase: 0, phase: 0, waveform: 'sin', audioScale: 0};
-const DEFAULT_ZOOM_WAVE = {...DEFAULT_WAVE, base: 1.0};
-const DEFAULT_DECAY_WAVE = {...DEFAULT_WAVE, base: 0.98};
+const DEFAULT_WAVE = { base: 0, amplitude: 0, frequency: 0, monitorPhase: 0, phase: 0, waveform: 'sin', audioScale: 0 };
+const DEFAULT_ZOOM_WAVE = { ...DEFAULT_WAVE, base: 1.0 };
+const DEFAULT_DECAY_WAVE = { ...DEFAULT_WAVE, base: 0.98 };
+
+const WAVE_DEFAULTS = {
+    enabled: 0, samples: 512, sep: 0, bSpectrum: 0,
+    bUseDots: 0, bDrawThick: 0, bAdditive: 0,
+    scaling: 1.0, smoothing: 0.5,
+    r: 1, g: 1, b: 1, a: 1,
+};
+
+function sanitiseCustomWaves(raw) {
+    const waves = [];
+    for (let i = 0; i < 4; i++) {
+        const prefix = `wavecode_${i}_`;
+        const wavePrefix = `wave_${i}_`;
+
+        const enabled = raw[prefix + 'enabled'] ?? WAVE_DEFAULTS.enabled;
+        if (!enabled) {
+            waves.push(null);
+            continue;
+        }
+
+        const baseVals = {};
+        for (const [key, defaultVal] of Object.entries(WAVE_DEFAULTS)) {
+            baseVals[key] = sanitiseNumber(raw[prefix + key], defaultVal);
+        }
+
+        const init_eqs = typeof raw[wavePrefix + 'init'] === 'string' ? raw[wavePrefix + 'init'] : '';
+        const frame_eqs = typeof raw[wavePrefix + 'per_frame'] === 'string' ? raw[wavePrefix + 'per_frame'] : '';
+        const point_eqs = typeof raw[wavePrefix + 'per_point'] === 'string' ? raw[wavePrefix + 'per_point'] : '';
+
+        waves.push({ baseVals, init_eqs, frame_eqs, point_eqs });
+    }
+    return waves;
+}
+
+const SHAPE_DEFAULTS = {
+    enabled: 0, sides: 4, additive: 0, thickOutline: 0, textured: 0, num_inst: 1,
+    x: 0.5, y: 0.5, rad: 0.1, ang: 0, tex_ang: 0, tex_zoom: 1.0,
+    r: 1, g: 0, b: 0, a: 0.8,
+    r2: 0, g2: 1, b2: 0, a2: 0.5,
+    border_r: 1, border_g: 1, border_b: 1, border_a: 0.1,
+};
+
+function sanitiseCustomShapes(raw) {
+    const shapes = [];
+    for (let i = 0; i < 4; i++) {
+        const prefix = `shapecode_${i}_`;
+        const shapePrefix = `shape_${i}_`;
+
+        const enabled = raw[prefix + 'enabled'] ?? SHAPE_DEFAULTS.enabled;
+        if (!enabled) {
+            shapes.push(null);
+            continue;
+        }
+
+        const baseVals = {};
+        for (const [key, defaultVal] of Object.entries(SHAPE_DEFAULTS)) {
+            baseVals[key] = raw[prefix + key] ?? defaultVal;
+        }
+
+        baseVals.image = typeof raw[prefix + 'image'] === 'string' ? raw[prefix + 'image'] : '';
+
+        const init_eqs = typeof raw[shapePrefix + 'init'] === 'string' ? raw[shapePrefix + 'init'] : '';
+        const frame_eqs = typeof raw[shapePrefix + 'per_frame'] === 'string' ? raw[shapePrefix + 'per_frame'] : '';
+
+        shapes.push({ baseVals, init_eqs, frame_eqs });
+    }
+    return shapes;
+}
 
 function sanitisePreset(raw, filePath) {
     if (!raw || typeof raw !== 'object')
@@ -344,6 +455,17 @@ function sanitisePreset(raw, filePath) {
     const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : null;
     if (!name)
         return null;
+
+    const initEqs = typeof raw.init_eqs === 'string'
+        ? raw.init_eqs
+        : (typeof raw.init_eqs_eel === 'string' ? raw.init_eqs_eel : null);
+    const frameEqs = typeof raw.frame_eqs === 'string'
+        ? raw.frame_eqs
+        : (typeof raw.frame_eqs_eel === 'string' ? raw.frame_eqs_eel : null);
+    const pixelEqs = typeof raw.pixel_eqs === 'string'
+        ? raw.pixel_eqs
+        : (typeof raw.pixel_eqs_eel === 'string' ? raw.pixel_eqs_eel : null);
+    const hasExpressionPayload = initEqs !== null || frameEqs !== null || pixelEqs !== null;
 
     const frame = raw.frame && typeof raw.frame === 'object' ? {
         zoom: sanitiseWaveSpec(raw.frame.zoom, DEFAULT_ZOOM_WAVE),
@@ -359,6 +481,34 @@ function sanitisePreset(raw, filePath) {
         warpScale: sanitiseNumber(raw.vertex.warpScale, 1.0),
         warpType: VALID_WARP_TYPES.has(raw.vertex.warpType) ? raw.vertex.warpType : 'radial',
     } : BOOTSTRAP_PRESET.vertex;
+
+    if (hasExpressionPayload) {
+        const baseVals = raw.baseVals && typeof raw.baseVals === 'object'
+            ? { ...raw.baseVals }
+            : {};
+
+        const customWaves = sanitiseCustomWaves(raw);
+        const customShapes = sanitiseCustomShapes(raw);
+
+        return {
+            id: `file:${filePath}`,
+            name,
+            description: typeof raw.description === 'string' ? raw.description : '',
+            source: 'file',
+            baseVals,
+            init_eqs: initEqs ?? '',
+            frame_eqs: frameEqs ?? '',
+            pixel_eqs: pixelEqs ?? '',
+            vertex: raw.vertex && typeof raw.vertex === 'object' ? vertex : null,
+            shaders: raw.shaders && typeof raw.shaders === 'object' ? {
+                draw: typeof raw.shaders.draw === 'string' ? raw.shaders.draw : null,
+                warp: typeof raw.shaders.warp === 'string' ? raw.shaders.warp : null,
+                composite: typeof raw.shaders.composite === 'string' ? raw.shaders.composite : null,
+            } : null,
+            customWaves,
+            customShapes,
+        };
+    }
 
     return {
         id: `file:${filePath}`,
@@ -376,7 +526,7 @@ function sanitisePreset(raw, filePath) {
 }
 
 export class PresetStore {
-    constructor({settings = null, logger = console} = {}) {
+    constructor({ settings = null, logger = console } = {}) {
         this._settings = settings;
         this._logger = logger;
         this._externalPresets = [];

@@ -13,6 +13,101 @@ function createBridgeWithMessages(options = {}) {
 }
 
 export function run(assert) {
+    // submitFrame forwards expanded renderer contract fields.
+    {
+        const {bridge} = createBridgeWithMessages();
+        const sent = [];
+        bridge._running = true;
+        bridge._ready = true;
+        bridge.send = message => {
+            sent.push(message);
+            return true;
+        };
+
+        bridge.submitFrame({
+            frame: 99,
+            t: 12.5,
+            zoom: 1.02,
+            rot: 0.01,
+            dx: 0.02,
+            dy: -0.03,
+            decay: 0.95,
+            cx: 0.33,
+            cy: 0.77,
+            sx: 1.2,
+            sy: 0.8,
+            zoomexp: 1.5,
+            warp: 0.42,
+            wrap: 0,
+            echo_zoom: 1.1,
+            echo_alpha: 0.25,
+            echo_orient: 2,
+            gamma: 1.3,
+            brighten: 1,
+            darken: 0,
+            solarize: 1,
+            invert: 0,
+            darken_center: 1,
+            ob_size: 0.02,
+            ob_r: 0.1,
+            ob_g: 0.2,
+            ob_b: 0.3,
+            ob_a: 0.4,
+            ib_size: 0.03,
+            ib_r: 0.5,
+            ib_g: 0.6,
+            ib_b: 0.7,
+            ib_a: 0.8,
+            mv_x: 14,
+            mv_y: 10,
+            mv_dx: 0.01,
+            mv_dy: -0.02,
+            mv_l: 0.9,
+            mv_r: 1.0,
+            mv_g: 0.9,
+            mv_b: 0.8,
+            mv_a: 0.7,
+            wave_mode: 3,
+            wave_a: 0.6,
+            wave_scale: 1.7,
+            wave_smoothing: 0.9,
+            wave_x: 0.45,
+            wave_y: 0.55,
+            wave_dots: 1,
+            wave_thick: 1,
+            additivewave: 1,
+            wave_data: [0.1, 0.3, 0.9, 0.2],
+            audio: {energy: 0.4, bass: 0.2, mid: 0.3, high: 0.1},
+        });
+
+        assert(sent.length === 1, 'submitFrame sends one message when bridge is running and ready');
+        const frame = sent[0];
+        assert(frame.type === 'frame' && frame.frame === 99, 'submitFrame sends frame message type and frame number');
+        assert(Math.abs(frame.cx - 0.33) < 1e-9 && Math.abs(frame.cy - 0.77) < 1e-9,
+            'submitFrame forwards cx/cy fields');
+        assert(Math.abs(frame.sx - 1.2) < 1e-9 && Math.abs(frame.sy - 0.8) < 1e-9,
+            'submitFrame forwards sx/sy fields');
+        assert(Math.abs(frame.zoomexp - 1.5) < 1e-9 && Math.abs(frame.warp - 0.42) < 1e-9,
+            'submitFrame forwards zoomexp/warp fields');
+        assert(frame.wrap === 0, 'submitFrame forwards wrap field');
+        assert(Math.abs(frame.echo_zoom - 1.1) < 1e-9 && Math.abs(frame.echo_alpha - 0.25) < 1e-9,
+            'submitFrame forwards echo fields');
+        assert(frame.echo_orient === 2, 'submitFrame forwards echo orientation');
+        assert(Math.abs(frame.ob_size - 0.02) < 1e-9 && Math.abs(frame.ib_size - 0.03) < 1e-9,
+            'submitFrame forwards border size fields');
+        assert(frame.mv_x === 14 && frame.mv_y === 10, 'submitFrame forwards motion vector grid fields');
+        assert(Math.abs(frame.mv_dx - 0.01) < 1e-9 && Math.abs(frame.mv_dy + 0.02) < 1e-9,
+            'submitFrame forwards motion vector displacement fields');
+        assert(Math.abs(frame.wave_a - 0.6) < 1e-9 && frame.wave_mode === 3,
+            'submitFrame forwards waveform control fields');
+        assert(frame.wave_dots === 1 && frame.wave_thick === 1 && frame.additivewave === 1,
+            'submitFrame forwards waveform draw flags');
+        assert(Array.isArray(frame.wave_data) && frame.wave_data.length === 4,
+            'submitFrame forwards waveform sample payload');
+        assert(Math.abs(frame.wave_data[2] - 0.9) < 1e-9,
+            'submitFrame preserves waveform sample values');
+    }
+
     // _armShmAcceptLoop does not arm when not running.
     {
         const {bridge} = createBridgeWithMessages();

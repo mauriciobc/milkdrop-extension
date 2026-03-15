@@ -41,6 +41,18 @@ extension_sources = files(
   'src/extension/wallpaper.js'
 )
 
+expr_sources = files(
+  'src/extension/expr/compiler.js',
+  'src/extension/expr/context.js',
+  'src/extension/expr/custom-shapes.js',
+  'src/extension/expr/custom-waves.js',
+  'src/extension/expr/functions.js',
+  'src/extension/expr/lexer.js',
+  'src/extension/expr/parser.js',
+  'src/extension/expr/per-frame.js',
+  'src/extension/expr/per-pixel.js'
+)
+
 renderer_sources = files(
   'src/renderer/gl-bridge.js',
   'src/renderer/glarea.js',
@@ -85,6 +97,8 @@ else
 endif
 
 install_data(extension_sources, install_dir: extension_dir)
+install_data(expr_sources, install_dir: join_paths(extension_dir, 'expr'))
+install_data(expr_sources, install_dir: join_paths(extension_dir, 'extension', 'expr'))
 install_data(renderer_sources, install_dir: join_paths(extension_dir, 'renderer'))
 install_data(
   'src/extension/schemas/@0@.gschema.xml'.format(schema_id),

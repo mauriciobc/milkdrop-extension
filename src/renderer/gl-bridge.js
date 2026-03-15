@@ -5,6 +5,61 @@ const encoder = new TextEncoder();
 
 const PERF_WINDOW_SIZE = 300;
 
+const FRAME_RENDER_CONTROL_DEFAULTS = {
+    cx: 0.5,
+    cy: 0.5,
+    sx: 1.0,
+    sy: 1.0,
+    zoomexp: 1.0,
+    warp: 1.0,
+    wrap: 1,
+    echo_zoom: 1.0,
+    echo_alpha: 0.0,
+    echo_orient: 0,
+    gamma: 1.0,
+    brighten: 0,
+    darken: 0,
+    solarize: 0,
+    invert: 0,
+    darken_center: 0,
+    ob_size: 0.01,
+    ob_r: 0.0,
+    ob_g: 0.0,
+    ob_b: 0.0,
+    ob_a: 0.0,
+    ib_size: 0.01,
+    ib_r: 0.25,
+    ib_g: 0.25,
+    ib_b: 0.25,
+    ib_a: 0.0,
+    mv_x: 12.0,
+    mv_y: 9.0,
+    mv_dx: 0.0,
+    mv_dy: 0.0,
+    mv_l: 0.9,
+    mv_r: 1.0,
+    mv_g: 1.0,
+    mv_b: 1.0,
+    mv_a: 0.0,
+    wave_mode: 0,
+    wave_a: 0.8,
+    wave_scale: 1.0,
+    wave_smoothing: 0.75,
+    wave_x: 0.5,
+    wave_y: 0.5,
+    wave_dots: 0,
+    wave_thick: 0,
+    additivewave: 0,
+    wave_r: 1.0,
+    wave_g: 1.0,
+    wave_b: 1.0,
+};
+
+function _numberOr(value, fallback) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+}
+
 /**
  * Rolling frame-time statistics collector.
  * Collects render_us and readback_us from frame-stat messages and
@@ -109,6 +164,10 @@ function buildShmSocketPath() {
     return `${runtimeDir}/gnome-milkdrop-shm-${nonce}.sock`;
 }
 
+function supportsAsyncShmFdReceive() {
+    return typeof Gio.UnixConnection?.prototype?.receive_fd_async === 'function';
+}
+
 export class GlBridge {
     constructor({strictRenderPath = false, logger = console, onMessage = null}) {
         this._logger = logger;
@@ -173,6 +232,10 @@ export class GlBridge {
         this._writeQueue = [];
         this._writePending = false;
         this._droppedFrameWrites = 0;
+
+        this._logger.warn?.(
+            `milkdrop gl-bridge: helper path=${this._helperPath} exists=${this.available}`
+        );
 
         if (!this.available) {
             this._ready = false;
@@ -297,6 +360,35 @@ export class GlBridge {
             mid: audio.mid ?? 0,
             high: audio.high ?? 0,
         };
+        for (const [key, fallback] of Object.entries(FRAME_RENDER_CONTROL_DEFAULTS))
+            msg[key] = _numberOr(frameState[key], fallback);
+        
+        // Send expanded PCM waveform data (576 L + 576 R = 1152 samples) for MilkDrop 2 compliance
+        const pcmLeft = Array.isArray(frameState.pcmLeft) ? frameState.pcmLeft : 
+                       (Array.isArray(audio.pcmLeft) ? audio.pcmLeft : []);
+        const pcmRight = Array.isArray(frameState.pcmRight) ? frameState.pcmRight : 
+                        (Array.isArray(audio.pcmRight) ? audio.pcmRight : []);
+        
+        // Combine L/R into interleaved format or send as separate arrays
+        msg.pcmLeft = pcmLeft.map(s => Number(s)).filter(Number.isFinite).slice(0, 576);
+        msg.pcmRight = pcmRight.map(s => Number(s)).filter(Number.isFinite).slice(0, 576);
+        
+        // Keep backward-compatible 64-sample wave_data for legacy presets
+        const waveData = Array.isArray(frameState.wave_data)
+            ? frameState.wave_data
+            : (Array.isArray(audio.waveData) ? audio.waveData : []);
+        msg.wave_data = waveData
+            .map(sample => Number(sample))
+            .filter(Number.isFinite)
+            .slice(0, 64);
+        
+        // Include spectrum data for custom wave per-point evaluation (value1, value2)
+        const spectrumLeft = Array.isArray(frameState.spectrumLeft) ? frameState.spectrumLeft :
+                           (Array.isArray(audio.spectrum) ? audio.spectrum : []);
+        const spectrumRight = Array.isArray(frameState.spectrumRight) ? frameState.spectrumRight :
+                            (Array.isArray(audio.spectrum) ? audio.spectrum : []);
+        msg.spectrumLeft = spectrumLeft.map(s => Number(s)).filter(Number.isFinite).slice(0, 64);
+        msg.spectrumRight = spectrumRight.map(s => Number(s)).filter(Number.isFinite).slice(0, 64);
         if (frameState.warpInShader === true) {
             msg.warpInShader = true;
             msg.warpAmount = frameState.warpAmount ?? 0;
@@ -304,6 +396,58 @@ export class GlBridge {
             msg.warpScale = frameState.warpScale ?? 1;
             msg.warpType = frameState.warpType ?? 0;
         }
+        
+        // Include custom waves (evaluated by expression engine)
+        if (Array.isArray(frameState.customWaves)) {
+            msg.customWaves = frameState.customWaves.map(wave => {
+                if (!wave) return null;
+                return {
+                    points: wave.points?.map(p => ({
+                        x: Number(p.x) || 0,
+                        y: Number(p.y) || 0,
+                        r: Number(p.r) || 1,
+                        g: Number(p.g) || 1,
+                        b: Number(p.b) || 1,
+                        a: Number(p.a) || 1,
+                    })) || [],
+                    useDots: !!wave.useDots,
+                    additive: !!wave.additive,
+                    drawThick: !!wave.drawThick,
+                };
+            });
+        }
+        
+        // Include custom shapes (evaluated by expression engine)
+        if (Array.isArray(frameState.customShapes)) {
+            msg.customShapes = frameState.customShapes.map(shape => {
+                if (!shape) return null;
+                return {
+                    x: Number(shape.x) || 0.5,
+                    y: Number(shape.y) || 0.5,
+                    rad: Number(shape.rad) || 0.1,
+                    ang: Number(shape.ang) || 0,
+                    sides: Math.max(3, Math.floor(Number(shape.sides) || 4)),
+                    r: Number(shape.r) || 1,
+                    g: Number(shape.g) || 0,
+                    b: Number(shape.b) || 0,
+                    a: Number(shape.a) || 0.8,
+                    r2: Number(shape.r2) || 0,
+                    g2: Number(shape.g2) || 1,
+                    b2: Number(shape.b2) || 0,
+                    a2: Number(shape.a2) || 0.5,
+                    border_r: Number(shape.border_r) || 1,
+                    border_g: Number(shape.border_g) || 1,
+                    border_b: Number(shape.border_b) || 1,
+                    border_a: Number(shape.border_a) || 0.1,
+                    additive: !!shape.additive,
+                    thickOutline: !!shape.thickOutline,
+                    textured: !!shape.textured,
+                    tex_ang: Number(shape.tex_ang) || 0,
+                    tex_zoom: Number(shape.tex_zoom) || 1,
+                };
+            });
+        }
+        
         this.send(msg);
     }
 
@@ -358,6 +502,17 @@ export class GlBridge {
 
     _setupShmListener() {
         this._teardownShmListener();
+
+        if (!supportsAsyncShmFdReceive()) {
+            this._emit({
+                type: 'telemetry',
+                stage: 'shm_unavailable',
+                level: 'warn',
+                msg: 'gio async fd receive is unavailable; disabling shm transport',
+            });
+            return;
+        }
+
         this._shmSocketPath = buildShmSocketPath();
         try {
             try {

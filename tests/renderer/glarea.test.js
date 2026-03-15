@@ -151,4 +151,80 @@ export function run(assert) {
         assert(state._glBridgeUploadMeshCalls === 1,
             'helper-ready with shader warp uploads identity mesh via bridge');
     }
+
+    // loadPresetVertex switches between shader warp and CPU warp deterministically.
+    {
+        const state = createMethodState();
+        state._helperReady = true;
+        state._vertexEval = {
+            _compiled: null,
+            compile(source) {
+                if (source && typeof source === 'object') {
+                    this._compiled = {
+                        warpAmount: source.warpAmount ?? 0,
+                        warpSpeed: source.warpSpeed ?? 1,
+                        warpScale: source.warpScale ?? 1,
+                        warpType: source.warpType ?? 'radial',
+                    };
+                    return;
+                }
+                this._compiled = null;
+            },
+        };
+
+        MilkdropGLArea.prototype.loadPresetVertex.call(state, {
+            warpAmount: 0.3,
+            warpSpeed: 1.2,
+            warpScale: 0.8,
+            warpType: 'radial',
+        });
+        assert(state._useShaderWarp === true,
+            'loadPresetVertex enables shader warp for supported built-in warp specs');
+        assert(state._warpParams?.warpType === 0,
+            'loadPresetVertex maps built-in warp type to shader helper index');
+        assert(state._glBridgeUploadMeshCalls === 1,
+            'loadPresetVertex uploads identity mesh immediately when helper-ready shader warp is enabled');
+
+        MilkdropGLArea.prototype.loadPresetVertex.call(state, 'dx = 0.02;');
+        assert(state._useShaderWarp === false,
+            'loadPresetVertex disables shader warp for expression-based vertex sources');
+        assert(state._warpParams === null,
+            'loadPresetVertex clears stale shader warp params when switching to expression source');
+        assert(state._uploadPresetMeshCalls === 1,
+            'loadPresetVertex re-uploads CPU warp mesh when shader warp path is disabled');
+    }
+
+    // setFrameState must not emit warpInShader after switching away from shader warp mode.
+    {
+        const state = createMethodState();
+        state._helperReady = true;
+        state._vertexEval = {
+            _compiled: null,
+            compile(source) {
+                if (source && typeof source === 'object') {
+                    this._compiled = {
+                        warpAmount: source.warpAmount ?? 0,
+                        warpSpeed: source.warpSpeed ?? 1,
+                        warpScale: source.warpScale ?? 1,
+                        warpType: source.warpType ?? 'radial',
+                    };
+                    return;
+                }
+                this._compiled = null;
+            },
+        };
+
+        MilkdropGLArea.prototype.loadPresetVertex.call(state, {
+            warpAmount: 0.25,
+            warpType: 'wave',
+        });
+        MilkdropGLArea.prototype.setFrameState.call(state, {frame: 31});
+        assert(state._glSubmitFramePayload?.warpInShader === true,
+            'setFrameState emits warpInShader while shader warp mode is active');
+
+        MilkdropGLArea.prototype.loadPresetVertex.call(state, null);
+        MilkdropGLArea.prototype.setFrameState.call(state, {frame: 32});
+        assert(!Object.prototype.hasOwnProperty.call(state._glSubmitFramePayload, 'warpInShader'),
+            'setFrameState omits warpInShader after shader warp mode is disabled');
+    }
 }
