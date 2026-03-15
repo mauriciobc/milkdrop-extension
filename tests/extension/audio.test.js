@@ -70,7 +70,7 @@ export function run(assert) {
 
         engine._stopPipeline();
 
-        assert(engine._historyCount === 0, '_stopPipeline clears history sample count');
+        assert(engine._histCount === 0, '_stopPipeline clears history sample count');
         assert(engine._beatCooldown === 0, '_stopPipeline resets beat cooldown');
         assert(engine._features.beat === 0, '_stopPipeline clears stale beat value');
     }
@@ -89,9 +89,9 @@ export function run(assert) {
         engine._lastUpdateUsec = GLib.get_monotonic_time() - 1_000_000;
 
         const message = makeSpectrumMessage(makeStructuredSpectrum([-40.0, -30.0, -20.0, -10.0, -20.0, -30.0]));
-        engine._handleSpectrumMessage(message);
+        engine._onSpectrum(message.get_structure());
 
-        assert(engine._historyCount === 1, 'spectrum after timeout starts a fresh history window');
+        assert(engine._histCount === 1, 'spectrum after timeout starts a fresh history window');
         assert(engine._features.beat === 0, 'spectrum after timeout does not reuse stale beat state');
     }
 
@@ -101,14 +101,14 @@ export function run(assert) {
         engine._enabled = true;
         const message = makeSpectrumMessage(makeStructuredSpectrum([-30.0, -20.0, -10.0, -20.0, -30.0, -40.0]));
         for (let i = 0; i < 100; i++)
-            engine._handleSpectrumMessage(message);
+            engine._onSpectrum(message.get_structure());
 
-        const boundedLength = engine._historyCount;
+        const boundedLength = engine._histCount;
         for (let i = 0; i < 20; i++)
-            engine._handleSpectrumMessage(message);
+            engine._onSpectrum(message.get_structure());
 
         assert(boundedLength >= 5, 'history window has a warmup-capable minimum size');
-        assert(engine._historyCount === boundedLength, 'history window stays bounded over time');
+        assert(engine._histCount === boundedLength, 'history window stays bounded over time');
     }
 
     // Structured parser returns expected band count and correct normalized values.
@@ -118,7 +118,7 @@ export function run(assert) {
         const engine = new AudioEngine({logger: buildLogger([])});
         const structured = makeStructuredSpectrum([-40.0, -20.0, -10.0]);
 
-        const bands = engine._parseSpectrumBands(structured);
+        const bands = engine._parseMagnitude(structured);
         const epsilon = 1e-6;
 
         assert(bands.length === 3, 'structured parser returns one band per magnitude element');
@@ -136,7 +136,7 @@ export function run(assert) {
     {
         const engine = new AudioEngine({logger: buildLogger([])});
         const structured = makeStructuredSpectrum([[-40.0, -20.0, -10.0], [-30.0, -10.0, -30.0]]);
-        const bands = engine._parseSpectrumBands(structured);
+        const bands = engine._parseMagnitude(structured);
         const epsilon = 1e-6;
 
         assert(bands.length === 3, 'structured parser flattens channelized spectrum to band count');
@@ -152,7 +152,7 @@ export function run(assert) {
     {
         const engine = new AudioEngine({logger: buildLogger([])});
         const structured = makeStructuredSpectrum([[-40.0, -20.0, -10.0]]);
-        const bands = engine._parseSpectrumBands(structured);
+        const bands = engine._parseMagnitude(structured);
 
         assert(bands.length === 3, 'structured parser supports one nested vector of bands');
     }
@@ -174,7 +174,7 @@ export function run(assert) {
             -80, -80, -80, -80,
         ];
         const structured = makeStructuredSpectrum(gstBands);
-        const bands = engine._parseSpectrumBands(structured);
+        const bands = engine._parseMagnitude(structured);
 
         assert(bands.length === 24, 'parser returns all 24 bands for a full GStreamer spectrum');
         assert(bands.every(v => v >= 0 && v <= 1), 'all normalized bands are in [0, 1]');
@@ -195,7 +195,7 @@ export function run(assert) {
             },
         };
 
-        engine._attachBusListener();
+        engine._attachBus();
 
         assert(engine._busWatchId === 42, 'bus listener attaches add_watch when available');
         assert(engine._busPollId === 0, 'add_watch path does not start polling fallback');
@@ -223,12 +223,12 @@ export function run(assert) {
             },
         };
 
-        engine._attachBusListener();
+        engine._attachBus();
         assert(engine._busSignalHandlerId === 13, 'signal watch path stores handler id');
         assert(engine._busSignalWatchEnabled, 'signal watch path marks signal watch as active');
         assert(signalWatches === 1, 'signal watch path enables signal emission once');
 
-        engine._detachBusListener();
+        engine._detachBus();
         assert(disconnectedId === 13, 'detaching bus listener disconnects message handler');
         assert(signalRemovals === 1, 'detaching bus listener removes signal watch');
         assert(engine._busSignalHandlerId === 0, 'detaching bus listener clears signal handler id');
@@ -244,7 +244,7 @@ export function run(assert) {
         };
         engine._bus = {};
 
-        engine._attachBusListener();
+        engine._attachBus();
 
         assert(pollStarted, 'bus listener starts polling fallback when watch APIs are unavailable');
     }
@@ -258,7 +258,7 @@ export function run(assert) {
             restartReason = reason;
         };
 
-        engine._handleBusMessage({
+        engine._onBusMessage({
             type: Gst.MessageType.ERROR,
             parse_error() {
                 return [{message: 'pipeline failed'}, 'Device or resource busy'];
@@ -280,12 +280,12 @@ export function run(assert) {
         const logs = [];
         const engine = new AudioEngine({logger: buildLogger(logs)});
 
-        engine._getMagnitudeFromStructure({
+        engine._parseMagnitude({
             get_array() {
                 throw new Error('broken array getter');
             },
         });
-        engine._extractFloatsFromVariant({
+        engine._readVariant({
             n_children() {
                 throw new Error('broken variant');
             },
@@ -314,7 +314,7 @@ export function run(assert) {
             hasAutoSource: true,
         });
 
-        const candidates = engine._buildSourceCandidates('auto');
+        const candidates = engine._buildCandidates('auto');
         const hasMicProneFallback = candidates.some(candidate =>
             candidate.source === 'pipewiresrc:auto' || candidate.source === 'autoaudiosrc'
         );
@@ -333,7 +333,7 @@ export function run(assert) {
             hasAutoSource: true,
         });
 
-        const candidates = engine._buildSourceCandidates('auto');
+        const candidates = engine._buildCandidates('auto');
 
         assert(candidates.length === 1 && candidates[0].source === 'stub', 'auto mode falls back to stub when no monitor backend exists');
     }
@@ -346,9 +346,9 @@ export function run(assert) {
             onFallback: (title, body) => fallbackCalls.push({title, body}),
         });
 
-        engine._notifyFallbackOnce('output-monitor-unavailable', 'Output Monitor Unavailable', 'first');
-        engine._notifyFallbackOnce('output-monitor-unavailable', 'Output Monitor Unavailable', 'second');
-        engine._notifyFallbackOnce('audio-unavailable', 'Audio Unavailable', 'third');
+        engine._notify('output-monitor-unavailable', 'Output Monitor Unavailable', 'first');
+        engine._notify('output-monitor-unavailable', 'Output Monitor Unavailable', 'second');
+        engine._notify('audio-unavailable', 'Audio Unavailable', 'third');
 
         assert(fallbackCalls.length === 2, 'fallback notifications are emitted once per fallback key');
         assert(fallbackCalls[0].body === 'first', 'first fallback notification is preserved');
@@ -372,11 +372,11 @@ export function run(assert) {
         engine._scheduleSourceReprobe = () => {
             reprobeScheduled = true;
         };
-        engine._notifyFallbackOnce = key => {
+        engine._notify = key => {
             fallbackKey = key;
         };
 
-        engine._schedulePipelineRestart('test error');
+        engine._scheduleRestart('test error');
 
         assert(reprobeScheduled, 'auto mode schedules source reprobe when restart budget is exhausted');
         assert(fallbackKey === 'audio-reprobe-mode', 'auto mode reports reprobe-mode fallback reason');
@@ -404,11 +404,11 @@ export function run(assert) {
         engine._scheduleSourceReprobe = () => {
             reprobeScheduled = true;
         };
-        engine._notifyFallbackOnce = key => {
+        engine._notify = key => {
             fallbackKey = key;
         };
 
-        engine._schedulePipelineRestart('budget test');
+        engine._scheduleRestart('budget test');
 
         assert(reprobeScheduled, 'custom restart budget triggers reprobe when exhausted');
         assert(fallbackKey === 'audio-reprobe-mode', 'custom restart budget exhaustion enters reprobe mode');
@@ -454,11 +454,11 @@ export function run(assert) {
         engine._scheduleSourceReprobe = () => {
             reprobeScheduled = true;
         };
-        engine._notifyFallbackOnce = key => {
+        engine._notify = key => {
             fallbackKey = key;
         };
 
-        engine._schedulePipelineRestart('test error');
+        engine._scheduleRestart('test error');
 
         assert(!reprobeScheduled, 'explicit source mode does not schedule auto reprobe');
         assert(fallbackKey === 'audio-disabled', 'explicit source mode reports disabled fallback reason');
@@ -476,15 +476,15 @@ export function run(assert) {
         const steadyBands = new Array(24).fill(-40.0);
         const steadyMessage = makeSpectrumMessage(makeStructuredSpectrum(steadyBands));
         for (let i = 0; i < 10; i++)
-            engine._handleSpectrumMessage(steadyMessage);
+            engine._onSpectrum(steadyMessage.get_structure());
 
-        assert(engine._historyCount >= 5, 'beat warmup: history has enough samples');
+        assert(engine._histCount >= 5, 'beat warmup: history has enough samples');
         assert(engine._features.beat === 0, 'beat warmup: no false positive during steady state');
 
         // Spike: 24 bands at -15 dB (normalized 0.8125) — a ~16x amplitude jump
         const spikeBands = new Array(24).fill(-15.0);
         const spikeMessage = makeSpectrumMessage(makeStructuredSpectrum(spikeBands));
-        engine._handleSpectrumMessage(spikeMessage);
+        engine._onSpectrum(spikeMessage.get_structure());
 
         assert(engine._features.beat === 1, 'beat detection fires on loud transient after steady state');
     }
@@ -497,17 +497,16 @@ export function run(assert) {
         const steadyBands = new Array(24).fill(-40.0);
         const steadyMessage = makeSpectrumMessage(makeStructuredSpectrum(steadyBands));
         for (let i = 0; i < 10; i++)
-            engine._handleSpectrumMessage(steadyMessage);
+            engine._onSpectrum(steadyMessage.get_structure());
 
         const spikeBands = new Array(24).fill(-15.0);
         const spikeMessage = makeSpectrumMessage(makeStructuredSpectrum(spikeBands));
 
-        engine._handleSpectrumMessage(spikeMessage);
+        engine._onSpectrum(spikeMessage.get_structure());
         assert(engine._features.beat === 1, 'first spike triggers beat');
         assert(engine._beatCooldown > 0, 'beat sets cooldown counter');
 
-        // Immediately send another spike — should be suppressed by cooldown
-        engine._handleSpectrumMessage(spikeMessage);
+        engine._onSpectrum(spikeMessage.get_structure());
         assert(engine._features.beat === 0, 'second spike during cooldown does not trigger beat');
     }
 
@@ -520,13 +519,12 @@ export function run(assert) {
         const quietBands = new Array(24).fill(-75.0);
         const quietMessage = makeSpectrumMessage(makeStructuredSpectrum(quietBands));
         for (let i = 0; i < 10; i++)
-            engine._handleSpectrumMessage(quietMessage);
+            engine._onSpectrum(quietMessage.get_structure());
 
-        // Spike relative to quiet floor
-        const spikeBands = new Array(24).fill(-55.0);
-        const spikeMessage = makeSpectrumMessage(makeStructuredSpectrum(spikeBands));
-        engine._handleSpectrumMessage(spikeMessage);
-
+        // -65 dB normalises to linear ~0.00056, still below BEAT_NOISE_FLOOR (0.001)
+        const belowFloorBands = new Array(24).fill(-65.0);
+        const belowFloorMessage = makeSpectrumMessage(makeStructuredSpectrum(belowFloorBands));
+        engine._onSpectrum(belowFloorMessage.get_structure());
         assert(engine._features.beat === 0, 'spike below noise floor does not trigger beat');
     }
 

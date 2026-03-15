@@ -164,6 +164,7 @@ export class IpcServer {
         capturedOutput.write_bytes_async(bytes, GLib.PRIORITY_DEFAULT, this._cancellable, (stream, result) => {
             this._writePending = false;
             if (this._output !== capturedOutput) {
+                try { stream.write_bytes_finish(result); } catch (_e) {}
                 this._flushWriteQueue();
                 return;
             }

@@ -253,7 +253,7 @@ export class Evaluator {
             decay = oldDecay + (decay - oldDecay) * t;
         }
 
-        const renderControls = buildRenderControls();
+        const renderControls = buildRenderControls(preset);
 
         // Capture CURRENT final values (blended if in transition) for the next transition.
         this._prevExprCtx = { zoom, rot, dx, dy, decay };

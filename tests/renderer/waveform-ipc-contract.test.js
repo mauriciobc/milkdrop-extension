@@ -18,9 +18,10 @@ export function run(assert) {
     // Test: IPC frame messages should carry expanded waveform data (576 L + 576 R = 1152 samples)
     // This enables proper waveform rendering for all MilkDrop 2 modes
     {
-        const hasExpandedWaveData = 
+        const hasExpandedWaveData =
             (bridgeText.includes('pcmLeft') || bridgeText.includes('wave_data')) &&
-            (bridgeText.includes('.slice(0, 576)') || bridgeText.includes('.slice(0, 1152)'));
+            (bridgeText.includes('.slice(0, 576)') || bridgeText.includes('.slice(0, 1152)') ||
+             bridgeText.includes('_copyAudioSamples'));
         
         assert(hasExpandedWaveData, 
             'gl-bridge.js should transmit expanded waveform data (576+ samples) for MilkDrop 2 compliance');

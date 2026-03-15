@@ -76,7 +76,7 @@ export function run(assert) {
             wave_dots: 1,
             wave_thick: 1,
             additivewave: 1,
-            wave_data: [0.1, 0.3, 0.9, 0.2],
+            wave_data: Array.from({length: 576}, (_, i) => Math.sin(i / 576 * Math.PI)),
             audio: {energy: 0.4, bass: 0.2, mid: 0.3, high: 0.1},
         });
 
@@ -102,9 +102,9 @@ export function run(assert) {
             'submitFrame forwards waveform control fields');
         assert(frame.wave_dots === 1 && frame.wave_thick === 1 && frame.additivewave === 1,
             'submitFrame forwards waveform draw flags');
-        assert(Array.isArray(frame.wave_data) && frame.wave_data.length === 4,
+        assert(Array.isArray(frame.wave_data) && frame.wave_data.length === 576,
             'submitFrame forwards waveform sample payload');
-        assert(Math.abs(frame.wave_data[2] - 0.9) < 1e-9,
+        assert(Math.abs(frame.wave_data[2] - Math.sin(2 / 576 * Math.PI)) < 1e-9,
             'submitFrame preserves waveform sample values');
     }
 

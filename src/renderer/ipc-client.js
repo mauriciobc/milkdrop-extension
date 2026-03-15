@@ -136,8 +136,10 @@ export class IpcClient {
         const bytes = new GLib.Bytes(encoder.encode(payload));
         const capturedOutput = this._output;
         capturedOutput.write_bytes_async(bytes, GLib.PRIORITY_DEFAULT, this._cancellable, (stream, result) => {
-            if (this._output !== capturedOutput)
+            if (this._output !== capturedOutput) {
+                try { stream.write_bytes_finish(result); } catch (_e) {}
                 return;
+            }
             this._writePending = false;
             try {
                 if (!this._running || this._closing || !this._output)

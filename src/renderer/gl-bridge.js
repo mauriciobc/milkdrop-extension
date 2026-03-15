@@ -61,6 +61,23 @@ function _numberOr(value, fallback) {
 }
 
 /**
+ * Copy up to `maxLen` finite numeric samples from `src` into a plain Array.
+ * Avoids chained map/filter/slice allocations on the per-frame hot path.
+ */
+function _copyAudioSamples(src, maxLen) {
+    if (!src || src.length === 0)
+        return [];
+    const len = Math.min(src.length, maxLen);
+    const out = [];
+    for (let i = 0; i < len; i++) {
+        const n = Number(src[i]);
+        if (Number.isFinite(n))
+            out.push(n);
+    }
+    return out;
+}
+
+/**
  * Rolling frame-time statistics collector.
  * Collects render_us and readback_us from frame-stat messages and
  * computes percentiles over a sliding window.
@@ -363,32 +380,27 @@ export class GlBridge {
         for (const [key, fallback] of Object.entries(FRAME_RENDER_CONTROL_DEFAULTS))
             msg[key] = _numberOr(frameState[key], fallback);
         
-        // Send expanded PCM waveform data (576 L + 576 R = 1152 samples) for MilkDrop 2 compliance
-        const pcmLeft = Array.isArray(frameState.pcmLeft) ? frameState.pcmLeft : 
-                       (Array.isArray(audio.pcmLeft) ? audio.pcmLeft : []);
-        const pcmRight = Array.isArray(frameState.pcmRight) ? frameState.pcmRight : 
-                        (Array.isArray(audio.pcmRight) ? audio.pcmRight : []);
-        
-        // Combine L/R into interleaved format or send as separate arrays
-        msg.pcmLeft = pcmLeft.map(s => Number(s)).filter(Number.isFinite).slice(0, 576);
-        msg.pcmRight = pcmRight.map(s => Number(s)).filter(Number.isFinite).slice(0, 576);
-        
-        // Keep backward-compatible 64-sample wave_data for legacy presets
-        const waveData = Array.isArray(frameState.wave_data)
-            ? frameState.wave_data
-            : (Array.isArray(audio.waveData) ? audio.waveData : []);
-        msg.wave_data = waveData
-            .map(sample => Number(sample))
-            .filter(Number.isFinite)
-            .slice(0, 64);
-        
-        // Include spectrum data for custom wave per-point evaluation (value1, value2)
-        const spectrumLeft = Array.isArray(frameState.spectrumLeft) ? frameState.spectrumLeft :
-                           (Array.isArray(audio.spectrum) ? audio.spectrum : []);
-        const spectrumRight = Array.isArray(frameState.spectrumRight) ? frameState.spectrumRight :
-                            (Array.isArray(audio.spectrum) ? audio.spectrum : []);
-        msg.spectrumLeft = spectrumLeft.map(s => Number(s)).filter(Number.isFinite).slice(0, 64);
-        msg.spectrumRight = spectrumRight.map(s => Number(s)).filter(Number.isFinite).slice(0, 64);
+        // Send expanded PCM waveform data (576 L + 576 R = 1152 samples) for MilkDrop 2 compliance.
+        // Avoid per-frame map/filter/slice allocations — copy directly into pre-sized arrays.
+            const pcmLeftSrc = Array.isArray(frameState.pcmLeft) ? frameState.pcmLeft
+                : (Array.isArray(audio.pcmLeft) ? audio.pcmLeft : null);
+            const pcmRightSrc = Array.isArray(frameState.pcmRight) ? frameState.pcmRight
+                : (Array.isArray(audio.pcmRight) ? audio.pcmRight : null);
+            msg.pcmLeft = _copyAudioSamples(pcmLeftSrc, 576);
+            msg.pcmRight = _copyAudioSamples(pcmRightSrc, 576);
+
+            const waveDataSrc = Array.isArray(frameState.wave_data) ? frameState.wave_data
+                : (Array.isArray(frameState.waveData) ? frameState.waveData
+                    : (Array.isArray(audio.waveData) ? audio.waveData : null));
+            msg.wave_data = _copyAudioSamples(waveDataSrc, 576);
+            msg.waveData = _copyAudioSamples(waveDataSrc, 64);
+
+            const spectrumLeftSrc = Array.isArray(frameState.spectrumLeft) ? frameState.spectrumLeft
+                : (Array.isArray(audio.spectrumLeft) ? audio.spectrumLeft : Array.isArray(audio.pcmLeft) ? audio.pcmLeft : null);
+            const spectrumRightSrc = Array.isArray(frameState.spectrumRight) ? frameState.spectrumRight
+                : (Array.isArray(audio.spectrumRight) ? audio.spectrumRight : Array.isArray(audio.pcmRight) ? audio.pcmRight : null);
+            msg.spectrumLeft = _copyAudioSamples(spectrumLeftSrc, 64);
+            msg.spectrumRight = _copyAudioSamples(spectrumRightSrc, 64);
         if (frameState.warpInShader === true) {
             msg.warpInShader = true;
             msg.warpAmount = frameState.warpAmount ?? 0;
@@ -755,10 +767,18 @@ export class GlBridge {
     }
 
     _readOutput() {
-        if (!this._stdout)
+        // Capture stdout/cancellable at call time so stale async callbacks from a
+        // previous helper instance don't interfere after _tryRestart replaces them.
+        const stdout = this._stdout;
+        const cancellable = this._cancellable;
+        if (!stdout)
             return;
 
-        this._stdout.read_line_async(GLib.PRIORITY_DEFAULT, this._cancellable, (stream, result) => {
+        stdout.read_line_async(GLib.PRIORITY_DEFAULT, cancellable, (stream, result) => {
+            // Guard: if _stdout was replaced by a restart, this loop is stale — drop it.
+            if (this._stdout !== stdout)
+                return;
+
             try {
                 const [line, length] = stream.read_line_finish_utf8(result);
                 if (length === 0) {
@@ -855,6 +875,10 @@ export class GlBridge {
                 stage: message.stage,
                 msg: message.msg ?? 'native helper ready',
             });
+            // Emit the raw telemetry too so listeners can observe it, then return —
+            // the fall-through this._emit(message) below would double-emit otherwise.
+            this._emit(message);
+            return;
         }
 
         if (message.type === 'shader_error') {

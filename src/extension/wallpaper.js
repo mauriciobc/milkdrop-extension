@@ -82,6 +82,8 @@ export const LiveWallpaper = GObject.registerClass(
                                 if (this._wallpaper === destroyedWallpaper)
                                     this._wallpaper = null;
                             } catch (_e) {}
+                            if (!this._wallpaper)
+                                this._applyWallpaper();
                             return GLib.SOURCE_REMOVE;
                         });
                     });
