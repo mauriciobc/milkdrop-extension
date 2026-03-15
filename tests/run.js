@@ -50,6 +50,9 @@ async function main() {
     await runTest('renderer/glarea', './renderer/glarea.test.js');
     await runTest('renderer/ipc-client', './renderer/ipc-client.test.js');
     await runTest('renderer/renderer', './renderer/renderer.test.js');
+    await runTest('extension/expr/lexer', './extension/expr/lexer.test.js');
+    await runTest('extension/expr/parser', './extension/expr/parser.test.js');
+    await runTest('extension/expr/compiler', './extension/expr/compiler.test.js');
 
     console.log(`\n${passed} passed, ${failed} failed`);
     if (failed > 0)
