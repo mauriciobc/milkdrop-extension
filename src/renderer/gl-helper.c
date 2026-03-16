@@ -1180,7 +1180,9 @@ compile_custom_program(HelperState *state,
 
     for (int i = 0; i < 2; i++) {
         glBindFramebuffer(GL_FRAMEBUFFER, state->fbo[i]);
-        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        /* alpha=0 so the warp pass is transparent on the first frame,
+         * letting the draw pass content show through unobstructed. */
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT);
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -1911,8 +1913,13 @@ render_frame(HelperState *state, double time_value,
     if (state->shm_socket_path) {
         int idx = state->shm_cur;
         if (state->shm_map[idx]) {
-            /* Persistent SHM: memcpy + send pre-allocated fd */
+            /* Persistent SHM: memcpy + send pre-allocated fd.
+             * Reset file offset to 0 before sending: SCM_RIGHTS passes the
+             * same open-file-description (shared offset) to the receiver, so
+             * without the seek the receiver would start reading at EOF after
+             * the first round-trip. */
             memcpy(state->shm_map[idx], state->pixel_buffer, pixel_count);
+            lseek(state->shm_fd[idx], 0, SEEK_SET);
             sent = emit_frame_pixels_shm_fd(state, state->shm_fd[idx],
                                             state->frame_count, width, height, stride);
             state->shm_cur = 1 - idx;

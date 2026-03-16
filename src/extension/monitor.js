@@ -210,7 +210,7 @@ class ManagedRendererWindow {
 }
 
 class RendererProcess {
-    constructor({extensionPath, monitor, logger, strictRenderPath = false, textOverlayVisible = true, onNotify = null}) {
+    constructor({extensionPath, monitor, logger, strictRenderPath = false, textOverlayVisible = true, onNotify = null, onExit = null}) {
         this._extensionPath = extensionPath;
         this._monitor = monitor;
         this._logger = logger;
@@ -218,6 +218,7 @@ class RendererProcess {
         this._textOverlayVisible = Boolean(textOverlayVisible);
         this._pendingTextOverlayVisible = this._textOverlayVisible;
         this._onNotify = onNotify;
+        this._onExit = onExit;
         this._waylandClient = null;
         this._stdout = null;
         this._cancellable = new Gio.Cancellable();
@@ -225,6 +226,7 @@ class RendererProcess {
         this._stopping = false;
         this._launchPath = 'uninitialized';
         this._pendingPresetLoad = null;
+        this._lastQueuedPreset = null;
         this._helperReady = false;
         this._lastFrameStat = null;
         this._windowManaged = false;
@@ -360,9 +362,12 @@ class RendererProcess {
                 return;
 
             const code = process.get_if_exited() ? process.get_exit_status() : -1;
-            this._logger.info?.(`milkdrop renderer exited for monitor ${this._monitor.index} with code ${code}`);
+            const wasExpected = this._stopping;
+            this._logger.warn?.(`milkdrop renderer exited monitor=${this._monitor.index} code=${code} expected=${wasExpected}`);
             this._running = false;
             this._stopping = false;
+            if (!wasExpected)
+                this._onExit?.(this._monitor.index);
         });
     }
 
@@ -460,6 +465,7 @@ class RendererProcess {
             shapes: preset.shapes,
             waves: preset.waves,
         } : null;
+        this._lastQueuedPreset = this._pendingPresetLoad;
         this._flushPendingPresetLoad();
     }
 
@@ -476,6 +482,8 @@ class RendererProcess {
         switch (message.type) {
         case 'ready':
             this._logger.warn?.(`[GNOME Milkdrop] renderer IPC ready monitor=${this._monitor.index}`);
+            if (!this._pendingPresetLoad && this._lastQueuedPreset)
+                this._pendingPresetLoad = this._lastQueuedPreset;
             this._flushPendingPresetLoad();
             this._flushPendingTextOverlaySetting();
             break;
@@ -490,8 +498,8 @@ class RendererProcess {
                 frameCount: message.frame_count ?? 0,
                 time: message.time ?? 0,
             };
-            if (this._lastFrameStat.frameCount === 1 || this._lastFrameStat.frameCount % 120 === 0) {
-                this._logger.info?.(
+            if (this._lastFrameStat.frameCount === 1 || this._lastFrameStat.frameCount % 300 === 0) {
+                this._logger.warn?.(
                     `milkdrop helper frame monitor=${this._monitor.index} frame=${this._lastFrameStat.frameCount} time=${this._lastFrameStat.time.toFixed(3)}`
                 );
             }
@@ -506,11 +514,15 @@ class RendererProcess {
         case 'fps':
             this._logger.debug?.(`milkdrop renderer FPS monitor ${this._monitor.index}: ${message.value}`);
             break;
-        case 'telemetry':
-            this._logger.info?.(
-                `milkdrop renderer telemetry monitor ${this._monitor.index} stage=${message.stage} level=${message.level ?? 'info'} ok=${message.ok ?? true} msg=${message.msg ?? ''}`
-            );
+        case 'telemetry': {
+            const lvl = message.level ?? 'info';
+            const text = `milkdrop renderer telemetry monitor=${this._monitor.index} stage=${message.stage} ok=${message.ok ?? true} msg=${message.msg ?? ''}`;
+            if (lvl === 'warn' || lvl === 'error')
+                this._logger.warn?.(text);
+            else
+                this._logger.info?.(text);
             break;
+        }
         case 'shader_error':
             this._logger.warn?.(`milkdrop shader error on monitor ${this._monitor.index}: ${message.msg}`);
             this._onNotify?.('Shader Compile Error', `Monitor ${this._monitor.index}: ${message.msg ?? 'unknown shader error'}`);
@@ -595,6 +607,7 @@ export class MonitorManager {
         this._lastNotificationTime = 0;
         this._enabled = false;
         this._disabling = false;
+        this._spawnedMonitorFingerprints = new Map();
         this._strictRenderPathSupported = this._hasSettingKey('strict-render-path');
         this._pauseWhenFullscreenSupported = this._hasSettingKey('pause-when-fullscreen');
         this._presetRotationModeSupported = this._hasSettingKey('preset-rotation-mode');
@@ -614,7 +627,10 @@ export class MonitorManager {
 
         this._monitorSignals.push({
             owner: Main.layoutManager,
-            id: Main.layoutManager.connect('monitors-changed', () => this._scheduleRestart('monitors-changed')),
+            id: Main.layoutManager.connect('monitors-changed', () => {
+                if (this._monitorsActuallyChanged())
+                    this._scheduleRestart('monitors-changed');
+            }),
         });
         this._windowManagerSignalId = global.window_manager.connect_after('map', (_manager, windowActor) => {
             if (this._disabling || !this._enabled)
@@ -769,6 +785,13 @@ export class MonitorManager {
         this._disabling = false;
     }
 
+    _onRendererExit(monitorIndex) {
+        this._rendererProcesses.delete(monitorIndex);
+        this._spawnedMonitorFingerprints.delete(monitorIndex);
+        if (this._enabled && !this._disabling)
+            this._scheduleRestart('renderer-exit');
+    }
+
     _scheduleRestart(reason) {
         if (!this._enabled || this._disabling)
             return;
@@ -776,7 +799,7 @@ export class MonitorManager {
         if (this._restartTimeoutId)
             GLib.source_remove(this._restartTimeoutId);
 
-        this._logger.debug?.(`milkdrop scheduling renderer restart: ${reason}`);
+        this._logger.warn?.(`milkdrop scheduling renderer restart: ${reason}`);
         this._restartTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, HOTPLUG_RESTART_DEBOUNCE_MS, () => {
             this._restartTimeoutId = 0;
             this._restartAll();
@@ -798,9 +821,7 @@ export class MonitorManager {
 
         const monitors = Main.layoutManager.monitors;
         const enabledMonitors = new Set(this._getStrvSetting('enabled-monitors', []));
-        const msg = `[GNOME Milkdrop] _spawnForCurrentMonitors: ${monitors.length} monitor(s), enabledMonitors size=${enabledMonitors.size}`;
-        this._logger.warn?.(msg);
-        GLib.log_structured?.('GNOME Milkdrop', GLib.LogLevelFlags.LEVEL_WARNING, { MESSAGE: msg });
+        this._logger.warn?.(`[GNOME Milkdrop] _spawnForCurrentMonitors: ${monitors.length} monitor(s), enabledMonitors size=${enabledMonitors.size}`);
 
         if (monitors.length === 0) {
             if (this._spawnRetryId)
@@ -832,10 +853,12 @@ export class MonitorManager {
                     : false,
                 textOverlayVisible: this._getBooleanSetting('text-overlay-enabled', true),
                 onNotify: (title, body) => this._notifyUser(title, body),
+                onExit: (monitorIndex) => this._onRendererExit(monitorIndex),
             });
             process.launch();
             process.queuePresetLoad(this._currentPreset);
             this._rendererProcesses.set(monitor.index, process);
+            this._spawnedMonitorFingerprints.set(monitor.index, `${monitor.x},${monitor.y},${monitor.width}x${monitor.height}`);
         }
     }
 
@@ -1155,6 +1178,21 @@ export class MonitorManager {
         for (const process of this._rendererProcesses.values())
             process.stop();
         this._rendererProcesses.clear();
+        this._spawnedMonitorFingerprints.clear();
+    }
+
+    _monitorsActuallyChanged() {
+        if (this._spawnedMonitorFingerprints.size === 0)
+            return false;   // nothing spawned yet; idle callback will spawn correctly
+        const monitors = Main.layoutManager.monitors;
+        if (monitors.length !== this._spawnedMonitorFingerprints.size)
+            return true;
+        for (const monitor of monitors) {
+            const fp = `${monitor.x},${monitor.y},${monitor.width}x${monitor.height}`;
+            if (this._spawnedMonitorFingerprints.get(monitor.index) !== fp)
+                return true;
+        }
+        return false;
     }
 
     _clearManagedWindow(window) {

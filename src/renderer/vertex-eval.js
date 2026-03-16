@@ -59,9 +59,15 @@ export class VertexEvaluator {
      * @returns {object} warped texture coordinates and per-pixel overrides
      */
     evaluate(u, v, frame = null) {
-        // Expression-based per-pixel path
+        // Expression-based per-pixel path.
+        // _exprCtx may arrive as a plain JSON object (serialised over IPC) that
+        // lacks the FrameContext methods.  Patch in a minimal resetTVars so the
+        // PerPixelEvaluator can call it without crashing.
         if (this._perPixel && frame?._exprCtx) {
-            const r = this._perPixel.evaluate(u, v, frame._exprCtx);
+            const ctx = frame._exprCtx;
+            if (typeof ctx.resetTVars !== 'function')
+                ctx.resetTVars = () => { for (let i = 1; i <= 8; i++) ctx[`t${i}`] = 0; };
+            const r = this._perPixel.evaluate(u, v, ctx);
             return {
                 u: u + r.dx,
                 v: v + r.dy,

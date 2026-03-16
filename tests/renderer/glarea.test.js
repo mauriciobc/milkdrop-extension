@@ -139,6 +139,46 @@ export function run(assert) {
         assert(state._loggerWarnings.length === 1, '_getHelperTexture logs warning for invalid frame payload');
     }
 
+    // _getHelperTexture nulls stale _helperTexture before allocating a new one (GC pressure fix).
+    // Without this, the previous 230KB GLib.Bytes-backed texture stays referenced until overwritten,
+    // preventing prompt collection by SpiderMonkey which cannot see the C-heap cost.
+    {
+        const state = createMethodState();
+        const assignments = [];
+        let helperTextureValue = {stale: true};  // simulate existing old texture
+
+        Object.defineProperty(state, '_helperTexture', {
+            get() { return helperTextureValue; },
+            set(v) {
+                assignments.push(v === null ? 'null' : 'value');
+                helperTextureValue = v;
+            },
+            configurable: true,
+        });
+
+        // Serial mismatch forces _getHelperTexture to rebuild the texture.
+        state._helperTextureSerial = 5;
+        state._helperFrame = {
+            serial: 6,
+            width: 2,
+            height: 2,
+            stride: 8,  // 2px * 4 bytes
+            bytes: {get_size: () => 16},  // 2*2*4 = 16 bytes
+        };
+
+        // The function must null the old texture BEFORE it tries to create a new one.
+        // If Gdk.MemoryTexture.new throws (e.g. no display), the null assignment is still
+        // the first thing to happen — we only assert the ordering is correct regardless.
+        try {
+            MilkdropGLArea.prototype._getHelperTexture.call(state);
+        } catch (_e) {
+            // creation failure is fine; the null step must still have happened first
+        }
+
+        assert(assignments.length >= 1 && assignments[0] === 'null',
+            '_getHelperTexture nulls stale _helperTexture before allocating new GdkMemoryTexture');
+    }
+
     // helper-ready with shader warp active uploads identity mesh via bridge instead of vertex-warped mesh.
     {
         const state = createMethodState();

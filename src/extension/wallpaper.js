@@ -32,7 +32,9 @@ export const LiveWallpaper = GObject.registerClass(
             this._monitorIndex = backgroundActor.monitor;
             this._wallpaper = null;
             this._pollSourceId = 0;
+            this._destroyed = false;
             this.connect('destroy', () => {
+                this._destroyed = true;
                 if (this._pollSourceId) {
                     GLib.source_remove(this._pollSourceId);
                     this._pollSourceId = 0;
@@ -56,6 +58,10 @@ export const LiveWallpaper = GObject.registerClass(
 
         _applyWallpaper() {
             const tryApply = () => {
+                if (this._destroyed) {
+                    this._pollSourceId = 0;
+                    return GLib.SOURCE_REMOVE;
+                }
                 try {
                     // Already applied, nothing to do.
                     if (this._wallpaper) {
@@ -74,16 +80,24 @@ export const LiveWallpaper = GObject.registerClass(
                     this._wallpaperDestroyId = this._wallpaper.connect('destroy', () => {
                         const destroyedWallpaper = this._wallpaper;
                         this._wallpaperIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
-                            this._wallpaperIdleId = 0;
+                            // Guard against the LiveWallpaper being finalized by C code
+                            // before this idle fires — any property access on `this` can
+                            // throw a "already disposed" error in that case.
                             try {
-                                if (destroyedWallpaper)
-                                    destroyedWallpaper.source = null;
-
-                                if (this._wallpaper === destroyedWallpaper)
-                                    this._wallpaper = null;
-                            } catch (_e) {}
-                            if (!this._wallpaper)
-                                this._applyWallpaper();
+                                this._wallpaperIdleId = 0;
+                                if (this._destroyed)
+                                    return GLib.SOURCE_REMOVE;
+                                try {
+                                    if (destroyedWallpaper)
+                                        destroyedWallpaper.source = null;
+                                    if (this._wallpaper === destroyedWallpaper)
+                                        this._wallpaper = null;
+                                } catch (_e) {}
+                                if (!this._wallpaper)
+                                    this._applyWallpaper();
+                            } catch (_e) {
+                                // LiveWallpaper already finalized — nothing to do.
+                            }
                             return GLib.SOURCE_REMOVE;
                         });
                     });

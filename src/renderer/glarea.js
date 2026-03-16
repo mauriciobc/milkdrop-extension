@@ -268,6 +268,9 @@ class MilkdropGLArea extends Gtk.Widget {
             return null;
         }
 
+        // Null the previous texture before allocating the new one so SpiderMonkey can
+        // promptly reclaim the 230+ KB of C-heap-backed pixel data it wraps.
+        this._helperTexture = null;
         this._helperTexture = Gdk.MemoryTexture.new(
             width,
             height,
@@ -332,6 +335,11 @@ class MilkdropGLArea extends Gtk.Widget {
             this.queue_draw();
             break;
         case 'frame-pixels':
+            // Drop the previous frame first so the 230+ KB GLib.Bytes can be GC'd
+            // promptly rather than waiting for SpiderMonkey to notice C-heap pressure.
+            this._helperFrame = null;
+            this._helperTexture = null;
+            this._helperTextureSerial = 0;
             this._helperFrame = message;
             this.queue_draw();
             break;

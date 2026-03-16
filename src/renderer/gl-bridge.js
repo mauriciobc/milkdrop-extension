@@ -1,5 +1,6 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import GLibUnix from 'gi://GLibUnix';
 
 const encoder = new TextEncoder();
 
@@ -185,6 +186,14 @@ function supportsAsyncShmFdReceive() {
     return typeof Gio.UnixConnection?.prototype?.receive_fd_async === 'function';
 }
 
+function supportsShmFdReceive() {
+    const proto = Gio.UnixConnection?.prototype;
+    if (!proto) return false;
+    // Prefer async; fall back to sync via GLib FD source (receive_fd + get_socket).
+    return typeof proto.receive_fd_async === 'function' ||
+        (typeof proto.receive_fd === 'function' && typeof proto.get_socket === 'function');
+}
+
 export class GlBridge {
     constructor({strictRenderPath = false, logger = console, onMessage = null}) {
         this._logger = logger;
@@ -214,13 +223,14 @@ export class GlBridge {
         this._shmAcceptPending = false;
         this._shmConnection = null;
         this._shmReceivePending = false;
+        this._shmReceiveSourceId = 0;
         this._shmReadPending = false;
         this._droppedFrameWrites = 0;
         this._perfCollector = new PerfCollector();
     }
 
     static WATCHDOG_INTERVAL_MS = 5000;
-    static WATCHDOG_TIMEOUT_MS = 10000;
+    static WATCHDOG_TIMEOUT_MS = 25000;
     static MAX_RESTARTS = 3;
     static MAX_WRITE_QUEUE_LENGTH = 120;
     static DEFAULT_ZOOM = 1.0;
@@ -515,12 +525,12 @@ export class GlBridge {
     _setupShmListener() {
         this._teardownShmListener();
 
-        if (!supportsAsyncShmFdReceive()) {
+        if (!supportsShmFdReceive()) {
             this._emit({
                 type: 'telemetry',
                 stage: 'shm_unavailable',
                 level: 'warn',
-                msg: 'gio async fd receive is unavailable; disabling shm transport',
+                msg: 'gio fd receive is unavailable; disabling shm transport',
             });
             return;
         }
@@ -572,6 +582,10 @@ export class GlBridge {
 
     _closeShmConnection() {
         this._shmReceivePending = false;
+        if (this._shmReceiveSourceId) {
+            GLib.source_remove(this._shmReceiveSourceId);
+            this._shmReceiveSourceId = 0;
+        }
         if (!this._shmConnection)
             return;
 
@@ -581,6 +595,57 @@ export class GlBridge {
             connection.close(null);
         } catch (_e) {
         }
+    }
+
+    // Thin wrapper around GLibUnix.fd_add_full so tests can mock it without touching
+    // the real GLib event loop.
+    _addFdSource(priority, fd, condition, callback) {
+        return GLibUnix.fd_add_full(priority, fd, condition, callback);
+    }
+
+    // Non-blocking FD receive loop for systems where receive_fd_async is unavailable.
+    // Uses a GLib FD source on the connection socket so receive_fd() is only called
+    // when data is actually readable — safe to call synchronously at that point.
+    _startShmReceiveLoopSync(connection, socketFd) {
+        if (!this._running || this._shmConnection !== connection)
+            return;
+
+        this._shmReceiveSourceId = this._addFdSource(
+            GLib.PRIORITY_DEFAULT, socketFd, GLib.IOCondition.IN, () => {
+                if (this._shmConnection !== connection) {
+                    this._shmReceiveSourceId = 0;
+                    return GLib.SOURCE_REMOVE;
+                }
+                try {
+                    const fd = connection.receive_fd(null);
+                    if (typeof fd === 'number' && fd >= 0) {
+                        this._shmFdQueue.push(fd);
+                        this._drainShmFrameQueue();
+                    } else {
+                        this._emit({
+                            type: 'telemetry',
+                            stage: 'shm_receive_fd',
+                            level: 'warn',
+                            msg: 'sync receive_fd returned invalid file descriptor',
+                        });
+                    }
+                } catch (error) {
+                    if (error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                        return GLib.SOURCE_REMOVE;
+                    this._emit({
+                        type: 'telemetry',
+                        stage: 'shm_receive_fd',
+                        level: 'warn',
+                        msg: error.message,
+                    });
+                    this._shmReceiveSourceId = 0;
+                    this._closeShmConnection();
+                    this._armShmAcceptLoop();
+                    return GLib.SOURCE_REMOVE;
+                }
+                return GLib.SOURCE_CONTINUE;
+            }
+        );
     }
 
     _closeQueuedShmFds() {
@@ -689,6 +754,14 @@ export class GlBridge {
                 }
 
                 if (typeof connection.receive_fd_async !== 'function') {
+                    // Try GLib source-based sync fallback (GJS < 1.86 doesn't bind receive_fd_async).
+                    const socket = typeof connection.get_socket === 'function' ? connection.get_socket() : null;
+                    const socketFd = typeof socket?.get_fd === 'function' ? socket.get_fd() : -1;
+                    if (typeof socketFd === 'number' && socketFd >= 0) {
+                        this._shmConnection = connection;
+                        this._startShmReceiveLoopSync(connection, socketFd);
+                        return;
+                    }
                     this._emit({
                         type: 'telemetry',
                         stage: 'shm_accept',
@@ -862,12 +935,17 @@ export class GlBridge {
         }
 
         if (message.type === 'frame-stat') {
+            // Update watchdog heartbeat on every frame-stat so the watchdog doesn't
+            // fire when the helper is rendering but pixels can't be delivered (e.g.
+            // large frames that exceed the base64 cap with no SHM).
+            this._lastFrameTime = GLib.get_monotonic_time();
             this._perfCollector.record(message);
             this._emit(message);
             return;
         }
 
         if (message.type === 'telemetry' && message.stage === 'program_ready' && message.ok) {
+            const wasReady = this._ready;
             this._ready = true;
             this._emit({
                 type: 'helper-ready',
@@ -875,6 +953,12 @@ export class GlBridge {
                 stage: message.stage,
                 msg: message.msg ?? 'native helper ready',
             });
+            // Restart the watchdog if _ready transitioned false→true (e.g. after a
+            // compile-shaders recompile stopped and then resumed frame rendering).
+            // The watchdog guard cancels itself when _ready becomes false, so it must
+            // be explicitly restarted here.
+            if (!wasReady)
+                this._startWatchdog();
             // Emit the raw telemetry too so listeners can observe it, then return —
             // the fall-through this._emit(message) below would double-emit otherwise.
             this._emit(message);
@@ -960,6 +1044,11 @@ export class GlBridge {
     _publishFramePixels(metadata, bytes) {
         this._lastFrameSerial += 1;
         this._lastFrameTime = GLib.get_monotonic_time();
+        // Explicitly drop the previous frame before creating the new one so the
+        // GLib.Bytes (230+ KB of pixel data) can be collected promptly.  Without this,
+        // SpiderMonkey may accumulate many live frames because it cannot see the C-heap
+        // cost of the opaque GLib.Bytes wrapper objects.
+        this._lastFramePixels = null;
         this._lastFramePixels = {
             frame: metadata.frame ?? 0,
             width: metadata.width ?? 1,
@@ -1015,6 +1104,10 @@ export class GlBridge {
 
             const elapsed = (GLib.get_monotonic_time() - this._lastFrameTime) / 1000;
             if (elapsed > GlBridge.WATCHDOG_TIMEOUT_MS) {
+                const watchdogMsg = `milkdrop gl-bridge: watchdog triggered, helper unresponsive for ${Math.round(elapsed)}ms`;
+                // Log directly to console so the message reaches journalctl even when
+                // the IPC channel to the extension is stalled or the write buffer is full.
+                this._logger.warn?.(watchdogMsg);
                 this._emit({
                     type: 'telemetry',
                     stage: 'watchdog',
@@ -1022,7 +1115,12 @@ export class GlBridge {
                     msg: `helper unresponsive for ${Math.round(elapsed)}ms, restarting`,
                 });
                 this._watchdogId = 0;
+                // Save config before stop() clears it, otherwise _tryRestart()
+                // will return immediately because !_startConfig.
+                const savedConfig = this._startConfig;
                 this.stop();
+                if (savedConfig)
+                    this._startConfig = savedConfig;
                 this._tryRestart();
                 return GLib.SOURCE_REMOVE;
             }
@@ -1039,14 +1137,29 @@ export class GlBridge {
     }
 
     _tryRestart() {
-        if (!this._startConfig)
+        if (!this._startConfig) {
+            // No config means we can't restart; notify listeners so the glarea
+            // can fall back to the software animation instead of freezing.
+            this._emit({
+                type: 'helper-ready',
+                ok: false,
+                stage: 'restart_unavailable',
+                msg: 'helper restart unavailable (no start config)',
+            });
             return;
+        }
 
         if (this._restartCount >= GlBridge.MAX_RESTARTS) {
             this._emit({
                 type: 'telemetry',
                 stage: 'watchdog',
                 level: 'error',
+                msg: `helper restart limit reached (${GlBridge.MAX_RESTARTS})`,
+            });
+            this._emit({
+                type: 'helper-ready',
+                ok: false,
+                stage: 'restart_limit_reached',
                 msg: `helper restart limit reached (${GlBridge.MAX_RESTARTS})`,
             });
             return;

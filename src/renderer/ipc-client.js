@@ -29,7 +29,10 @@ export class IpcClient {
         this.currentFrame = null;
         this._firstLineReceived = false;
         this._frameReceiveCount = 0;
+        this._heartbeatId = 0;
     }
+
+    static HEARTBEAT_TIMEOUT_MS = 15000;
 
     start() {
         if (!this._socketPath || this._running)
@@ -94,7 +97,29 @@ export class IpcClient {
         });
     }
 
+    _clearHeartbeat() {
+        if (this._heartbeatId) {
+            GLib.source_remove(this._heartbeatId);
+            this._heartbeatId = 0;
+        }
+    }
+
+    _resetHeartbeat() {
+        this._clearHeartbeat();
+        if (!this._running || this._closing)
+            return;
+        this._heartbeatId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, IpcClient.HEARTBEAT_TIMEOUT_MS, () => {
+            this._heartbeatId = 0;
+            if (!this._running || this._closing)
+                return GLib.SOURCE_REMOVE;
+            this._logger.warn?.('milkdrop [renderer] IPC heartbeat timeout — no lines received for 15s, reconnecting');
+            this._handleDisconnect();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
     _handleDisconnect() {
+        this._clearHeartbeat();
         this._closeConnection();
         this._scheduleReconnect();
     }
@@ -113,6 +138,7 @@ export class IpcClient {
             this._reconnectSourceId = 0;
         }
         this._cancellable?.cancel();
+        this._clearHeartbeat();
         this._closeConnection();
         this._socketClient = null;
         this._cancellable = null;
@@ -160,7 +186,13 @@ export class IpcClient {
         if (!this._running || this._closing || !this._input)
             return;
 
-        this._input.read_line_async(GLib.PRIORITY_HIGH, this._cancellable, (stream, result) => {
+        // Capture _input identity so a stale callback after reconnect can detect it is outdated
+        // and not register a duplicate read loop on the new connection's input stream.
+        const capturedInput = this._input;
+        capturedInput.read_line_async(GLib.PRIORITY_HIGH, this._cancellable, (stream, result) => {
+            // Guard: if _input was replaced by a reconnect, this loop is stale — drop it.
+            if (this._input !== capturedInput)
+                return;
             try {
                 if (!this._running || this._closing || !this._input)
                     return;
@@ -172,6 +204,7 @@ export class IpcClient {
                 }
 
                 this._handleLine(line);
+                this._resetHeartbeat();
                 this._readLoop();
             } catch (error) {
                 if (!error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {

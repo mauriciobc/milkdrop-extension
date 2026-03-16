@@ -189,7 +189,48 @@ export function run(assert) {
         assert(bridge._shmFdQueue[0] === 17, 'accept_finish tuple keeps received fd value');
     }
 
-    // _armShmAcceptLoop does not use synchronous receive_fd fallback path.
+    // _armShmAcceptLoop uses GLib FD source when receive_fd_async is unavailable but get_socket() is present.
+    {
+        const {bridge} = createBridgeWithMessages();
+        const fdSourceCalls = [];
+        bridge._addFdSource = (priority, fd, condition, callback) => {
+            fdSourceCalls.push({priority, fd, condition, callback});
+            return 77; // fake source id
+        };
+
+        const fakeSocketFd = 42;
+        const connection = {
+            receive_fd() { return 99; },
+            get_socket() { return {get_fd: () => fakeSocketFd}; },
+            close() {},
+        };
+        const listener = {
+            accept_async(_cancellable, callback) { callback(listener, {}); },
+            accept_finish() { return connection; },
+        };
+
+        bridge._running = true;
+        bridge._cancellable = {};
+        bridge._shmListener = listener;
+        bridge._armShmAcceptLoop();
+
+        assert(fdSourceCalls.length === 1,
+            '_armShmAcceptLoop arms GLib FD source when receive_fd_async is unavailable');
+        assert(fdSourceCalls.length >= 1 && fdSourceCalls[0].fd === fakeSocketFd,
+            '_armShmAcceptLoop FD source uses connection socket FD');
+        assert(bridge._shmConnection === connection,
+            '_armShmAcceptLoop keeps connection alive for sync receive loop');
+
+        // Simulate GLib source firing — should call receive_fd and enqueue the FD
+        if (fdSourceCalls.length >= 1) {
+            const result = fdSourceCalls[0].callback();
+            assert(bridge._shmFdQueue.length === 1, 'sync receive loop enqueues FD on source fire');
+            assert(bridge._shmFdQueue[0] === 99, 'sync receive loop enqueues FD value from receive_fd');
+            assert(result === GLib.SOURCE_CONTINUE, 'sync receive loop GLib source continues after receiving FD');
+        }
+    }
+
+    // _armShmAcceptLoop disables shm when sync connection has no accessible socket FD.
     {
         const {bridge, messages} = createBridgeWithMessages();
         let acceptCalls = 0;
@@ -222,10 +263,10 @@ export function run(assert) {
             message.stage === 'shm_accept' &&
             message.level === 'warn'
         );
-        assert(acceptCalls === 1, 'sync-only connection is rejected without rearming receive loop');
-        assert(bridge._shmListener === null, 'sync-only connection disables shm listener');
-        assert(bridge._shmFdQueue.length === 0, 'sync-only connection does not enqueue fds');
-        assert(warned, 'sync-only connection emits warning telemetry');
+        assert(acceptCalls === 1, 'no-socket-fd connection is rejected without rearming receive loop');
+        assert(bridge._shmListener === null, 'no-socket-fd connection disables shm listener');
+        assert(bridge._shmFdQueue.length === 0, 'no-socket-fd connection does not enqueue fds');
+        assert(warned, 'no-socket-fd connection emits warning telemetry');
     }
 
     // _armShmAcceptLoop keeps a persistent connection and receives multiple fds without re-accept.
