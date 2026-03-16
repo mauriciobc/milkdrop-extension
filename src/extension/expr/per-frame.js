@@ -71,6 +71,16 @@ export class ExpressionEvaluator {
         this._ctx.rerollPresetRandom();
     }
 
+    /**
+     * Inject fixed rand_start/rand_preset for deterministic testing (golden frame).
+     * Call after loadPreset and before runInit when generating or comparing goldens.
+     * @param {[number,number,number,number]|{x,y,z,w}|null} randStart
+     * @param {[number,number,number,number]|{x,y,z,w}|null} randPreset
+     */
+    setRandForTesting(randStart, randPreset) {
+        this._ctx.setRandForTesting(randStart, randPreset);
+    }
+
     _loadCustomWaves(customWaves) {
         for (let i = 0; i < 4; i++) {
             const waveDef = customWaves && customWaves[i] ? customWaves[i] : null;

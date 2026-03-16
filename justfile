@@ -55,5 +55,8 @@ compliance preset="0":
 bench-json:
     gjs -m tests/bench/run.js -- --json
 
+golden-frames:
+    gjs -m tools/generate-golden-frames.js
+
 profile:
     sysprof-cli --session -- dbus-run-session gnome-shell --devkit --wayland

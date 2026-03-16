@@ -6,7 +6,7 @@
  */
 
 import { parse, NodeType } from './parser.js';
-import { builtins, EPSILON } from './functions.js';
+import { builtins, EPSILON, ZERO_THRESHOLD } from './functions.js';
 
 /**
  * Compile a MilkDrop expression string into an executable function.
@@ -88,8 +88,8 @@ function compileBinOp(node) {
         case '<=': return (ctx) => leftFn(ctx) <= rightFn(ctx) ? 1 : 0;
         case '>=': return (ctx) => leftFn(ctx) >= rightFn(ctx) ? 1 : 0;
         // Logic
-        case '&': return (ctx) => (Math.abs(leftFn(ctx)) > EPSILON && Math.abs(rightFn(ctx)) > EPSILON) ? 1 : 0;
-        case '|': return (ctx) => (Math.abs(leftFn(ctx)) > EPSILON || Math.abs(rightFn(ctx)) > EPSILON) ? 1 : 0;
+        case '&': return (ctx) => (Math.abs(leftFn(ctx)) > ZERO_THRESHOLD && Math.abs(rightFn(ctx)) > ZERO_THRESHOLD) ? 1 : 0;
+        case '|': return (ctx) => (Math.abs(leftFn(ctx)) > ZERO_THRESHOLD || Math.abs(rightFn(ctx)) > ZERO_THRESHOLD) ? 1 : 0;
         default: return (_ctx) => 0;
     }
 }
@@ -98,7 +98,7 @@ function compileUnaryOp(node) {
     const operandFn = compileNode(node.operand);
     switch (node.op) {
         case '-': return (ctx) => -operandFn(ctx);
-        case '!': return (ctx) => Math.abs(operandFn(ctx)) < EPSILON ? 1 : 0;
+        case '!': return (ctx) => Math.abs(operandFn(ctx)) < ZERO_THRESHOLD ? 1 : 0;
         default: return operandFn;
     }
 }

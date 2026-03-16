@@ -147,14 +147,14 @@ export function run(assert) {
         const ctx = evalExpr('y = atan(0)');
         assert(approx(ctx.y, 0), 'fn: atan(0) ≈ 0');
     }
-    // asin/acos clamped to [-1, 1]
+    // asin/acos out-of-domain returns 0 (projectM parity)
     {
         const ctx = evalExpr('y = asin(2)');
-        assert(approx(ctx.y, Math.PI / 2), 'fn: asin(2) clamped → asin(1)');
+        assert(ctx.y === 0, 'fn: asin(2) out of domain → 0');
     }
     {
         const ctx = evalExpr('y = acos(-2)');
-        assert(approx(ctx.y, Math.PI), 'fn: acos(-2) clamped → acos(-1)');
+        assert(ctx.y === 0, 'fn: acos(-2) out of domain → 0');
     }
 
     // --- atan2 ---
@@ -243,10 +243,10 @@ export function run(assert) {
 
     // --- bnot ---
     {
-        const ctx = evalExpr('a = bnot(0); b = bnot(1); c = bnot(0.000005)');
+        const ctx = evalExpr('a = bnot(0); b = bnot(1); c = bnot(0.000001)');
         assert(ctx.a === 1, 'fn: bnot(0) = 1');
         assert(ctx.b === 0, 'fn: bnot(1) = 0');
-        assert(ctx.c === 1, 'fn: bnot(tiny) = 1 (< EPSILON)');
+        assert(ctx.c === 1, 'fn: bnot(tiny) = 1 (≤ ZERO_THRESHOLD)');
     }
 
     // --- invsqrt ---

@@ -12,10 +12,14 @@ meson compile -C build   # Build C native helper
 
 ### Test
 ```bash
-gjs -m tests/run.js                        # All unit tests (702 tests)
-gjs -m tests/bench/run.js                  # All benchmarks
+gjs -m tests/run.js                        # All unit tests
+gjs -m tests/bench/run.js                  # All benchmarks (run from repo root)
 gjs -m tests/bench/run.js -- --json        # Benchmark JSON output (for regression checks)
+gjs -m tests/run-parity.js                 # Parity tests vs projectM (expression engine, parser, golden frame, visual)
+just golden-frames                         # Generate per-frame golden JSONs (from projectM test presets)
 ```
+
+**Benchmarks and parity:** Always run `tests/bench/run.js` and `tests/run-parity.js` from the **repository root**; parser-parity and preset-loading use paths relative to cwd (e.g. `tests/bench/data/PresetFileParser/`).
 
 There is no way to run a single test file in isolation — the runner in `tests/run.js` imports all test modules. To focus on a subsystem, check the relevant `tests/extension/` or `tests/renderer/` file and run the full suite.
 
@@ -95,6 +99,14 @@ PulseAudio Monitor Source → GStreamer Spectrum (24 bands) → AppSink (576 PCM
 - **Tests:** Custom minimal runner (`tests/run.js`). Each test module exports `run(assert)`. No Jest/Mocha.
 - **Target:** GNOME Shell 47, 48, 49. Wayland-first.
 - **GSettings schema:** `org.gnome.shell.extensions.milkdrop` (19 keys for monitors, audio, presets, rendering).
+
+## Parity vs projectM
+- **Parser:** `.milk` preset parser lives in `src/extension/milk-parser.js`; validated by `tests/bench/parser-benchmark.js` (PresetFileParser-style cases) and `tests/parity/expr/preset-parser.test.js`.
+- **Golden per-frame:** Goldens in `tests/parity/golden/frame/*.golden.json` store reference inputs/outputs per frame (projectM test presets only). Generate with `just golden-frames` (requires `projectm/presets/tests/` or `tests/parity/golden/frame/presets/`). The parity test compares evaluator output to goldens; see `tests/parity/golden/README.md`.
+- **Optional projectM repo:** For full preset comparison, clone [projectM](https://github.com/projectM-visualizer/projectm) (e.g. as `projectm/` in repo root). Then:
+  - `projectm/presets/tests/` — parity preset-parser can load these .milk files if present (SKIP when missing).
+  - Visual parity (`tests/parity/visual/visual.test.js`) can use projectM SDL test UI if built: `cd projectm/build && cmake .. -DENABLE_SDL_UI=ON && make`.
+- Validation is **behavioral parity** (same test cases as projectM); no C++ comparison required for CI.
 
 ## Key Constraints
 - Expression engine must never use `eval()` or `new Function()` — GNOME Shell CSP prohibits it.

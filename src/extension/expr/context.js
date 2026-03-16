@@ -174,6 +174,32 @@ export class FrameContext {
     }
 
     /**
+     * Inject fixed rand values for deterministic testing (e.g. golden frame generation/consumption).
+     * Call after loadPreset and before runInit when generating or comparing goldens.
+     * @param {[number,number,number,number]|{x,y,z,w}|null} randStart - four values for rand_start
+     * @param {[number,number,number,number]|{x,y,z,w}|null} randPreset - four values for rand_preset
+     */
+    setRandForTesting(randStart, randPreset) {
+        const toArr = (v) => {
+            if (!v) return null;
+            if (Array.isArray(v) && v.length >= 4) return v.slice(0, 4);
+            if (typeof v === 'object' && 'x' in v && 'y' in v && 'z' in v && 'w' in v)
+                return [v.x, v.y, v.z, v.w];
+            return null;
+        };
+        const a = toArr(randStart);
+        if (a) {
+            this._rand_start = a;
+            this.rand_start = { x: a[0], y: a[1], z: a[2], w: a[3] };
+        }
+        const b = toArr(randPreset);
+        if (b) {
+            this._rand_preset = b;
+            this.rand_preset = { x: b[0], y: b[1], z: b[2], w: b[3] };
+        }
+    }
+
+    /**
      * Reset for a new preset while keeping large buffers.
      */
     resetForNewPreset() {

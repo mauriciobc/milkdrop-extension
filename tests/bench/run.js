@@ -84,13 +84,16 @@ async function main() {
                 const maybePromise = mod.run(bench);
                 if (maybePromise && typeof maybePromise.then === 'function')
                     await maybePromise;
+            } else if (typeof mod.main === 'function') {
+                await mod.main();
             } else {
-                print(`SKIP: ${name}: module has no run(bench) export`);
+                print(`SKIP: ${name}: module has no run(bench) or main() export`);
             }
         } catch (e) {
             print(`ERROR: ${name}: ${e.message}`);
             if (e.stack)
                 printerr(e.stack);
+            throw e;
         }
     };
 
@@ -98,6 +101,8 @@ async function main() {
     await runBench('audio', './audio.bench.js');
     await runBench('ipc-serialization', './ipc.bench.js');
     await runBench('presets', './presets.bench.js');
+    await runBench('parser-parity', './parser-benchmark.js');
+    await runBench('preset-loading', './preset-benchmark.js');
 
     if (jsonOutput) {
         print(JSON.stringify({benchmarks: results, timestamp: new Date().toISOString()}, null, 2));
