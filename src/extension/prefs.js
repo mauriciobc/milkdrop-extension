@@ -28,6 +28,41 @@ function addEntryRow(group, settings, key, title, subtitle) {
     group.add(row);
 }
 
+function addFolderRow(group, settings, key, title, subtitle, parentWindow) {
+    const row = new Adw.ActionRow({title, subtitle});
+    const entry = new Gtk.Entry({hexpand: true, valign: Gtk.Align.CENTER, editable: false});
+    const button = new Gtk.Button({label: _('Select…'), valign: Gtk.Align.CENTER});
+
+    const updateEntry = () => {
+        try {
+            entry.set_text(settings.get_string(key) ?? '');
+        } catch (_e) {
+            entry.set_text('');
+        }
+    };
+
+    updateEntry();
+    settings.connect(`changed::${key}`, updateEntry);
+
+    button.connect('clicked', () => {
+        const dialog = new Gtk.FileDialog({title});
+        dialog.select_folder(parentWindow, null, (d, res) => {
+            try {
+                const file = d.select_folder_finish(res);
+                if (!file)
+                    return;
+                const path = file.get_path?.();
+                if (path)
+                    settings.set_string(key, path);
+            } catch (_e) {}
+        });
+    });
+
+    row.add_suffix(entry);
+    row.add_suffix(button);
+    group.add(row);
+}
+
 export default class MilkdropPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
@@ -96,8 +131,7 @@ export default class MilkdropPreferences extends ExtensionPreferences {
         addSwitchRow(advancedGroup, settings, 'beat-cuts-enabled', _('Beat cuts enabled'), _('Allow beat events to trigger preset changes.'));
         addSpinRow(advancedGroup, settings, 'beat-cut-cooldown-sec', _('Beat-cut cooldown (sec)'), _('Minimum seconds between beat-triggered preset cuts (applies immediately).'), new Gtk.Adjustment({lower: 0.0, upper: 30.0, step_increment: 0.1, page_increment: 0.5, value: 2.0}));
         addSpinRow(advancedGroup, settings, 'blend-time', _('Blend time'), _('Seconds used for preset blending.'), new Gtk.Adjustment({lower: 0.0, upper: 10.0, step_increment: 0.1, page_increment: 0.5, value: 2.0}));
-        addEntryRow(advancedGroup, settings, 'preset-directory', _('Preset directory'), _('Optional external preset path.'));
-        addEntryRow(advancedGroup, settings, 'preset-path', _('Preset path'), _('Optional preset file path (usually a .milk). When set, automatic rotation is paused.'));
+        addFolderRow(advancedGroup, settings, 'preset-directory', _('Preset directory'), _('Optional external preset path.'), window);
 
         const statusRow = new Adw.ActionRow({
             title: _('Scaffold status'),

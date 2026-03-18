@@ -57,11 +57,6 @@
       <summary>Preset directory</summary>
       <description>Optional directory containing user-managed preset files.</description>
     </key>
-    <key name="preset-path" type="s">
-      <default>''</default>
-      <summary>Preset path</summary>
-      <description>Optional preset file path (usually a .milk). When set, the renderer will load this preset and automatic rotation is paused.</description>
-    </key>
     <key name="fps-limit" type="i">
       <default>60</default>
       <summary>FPS limit</summary>

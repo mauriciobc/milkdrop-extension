@@ -7,7 +7,6 @@ const NEW_KEYS = [
     {name: 'audio-reprobe-delay-ms', type: 'i', defaultValue: '2500'},
     {name: 'preset-rotation-mode', type: 's', defaultValue: "'random'"},
     {name: 'beat-cut-cooldown-sec', type: 'd', defaultValue: '2.0'},
-    {name: 'preset-path', type: 's', defaultValue: "''"},
 ];
 
 const PREFS_KEYS = [
@@ -17,7 +16,6 @@ const PREFS_KEYS = [
     'audio-reprobe-delay-ms',
     'preset-rotation-mode',
     'beat-cut-cooldown-sec',
-    'preset-path',
 ];
 
 const RUNTIME_KEY_OWNERS = {
@@ -27,7 +25,6 @@ const RUNTIME_KEY_OWNERS = {
     'audio-reprobe-delay-ms': 'src/extension/audio.js',
     'preset-rotation-mode': 'src/extension/monitor.js',
     'beat-cut-cooldown-sec': 'src/extension/monitor.js',
-    'preset-path': 'src/extension/monitor.js',
 };
 
 function readText(relativePath) {

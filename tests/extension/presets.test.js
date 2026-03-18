@@ -70,17 +70,14 @@ export async function run(assert) {
 
     {
         const tempDir = GLib.dir_make_tmp('milkdrop-expr-presets-XXXXXX');
-        const presetPath = GLib.build_filenamev([tempDir, 'expr-eel.json']);
-        const exprPreset = {
-            name: 'External Expr EEL',
-            description: 'Expression preset loaded from file',
-            baseVals: { zoom: 1.01, rot: 0.02 },
-            init_eqs_eel: 'q1 = 1;',
-            frame_eqs_eel: 'zoom = zoom + energy * 0.1;',
-            pixel_eqs_eel: 'dx = rad * 0.01;',
-        };
-
-        GLib.file_set_contents(presetPath, JSON.stringify(exprPreset));
+        const presetPath = GLib.build_filenamev([tempDir, 'external-test.milk']);
+        const milkText =
+            '[preset00]\n' +
+            'fZoom=1.01\n' +
+            'fRot=0.02\n' +
+            'per_frame_1=zoom=zoom+energy*0.1;\n' +
+            'per_pixel_1=dx=rad*0.01;\n';
+        GLib.file_set_contents(presetPath, milkText);
 
         const settings = {
             settings_schema: {
@@ -91,13 +88,20 @@ export async function run(assert) {
 
         try {
             const externalStore = new PresetStore({settings});
-            const loaded = await externalStore.loadPreset('file:expr-eel.json');
+            const index = await externalStore.loadIndex();
+            const externalEntry = index.find(entry => entry.source === 'file') ?? null;
+            assert(externalEntry && typeof externalEntry.id === 'string', 'external .milk appears in loadIndex');
+            assert(externalEntry.id.startsWith('file:'), 'external .milk index id is file:<absPath>');
+            const absPath = externalEntry.id.replace(/^file:/, '');
+            assert(absPath === presetPath, 'external .milk index id uses absolute path');
+
+            const loaded = await externalStore.loadPreset(externalEntry.id);
             assert(loaded.source === 'file', 'external expression preset keeps source=file');
-            assert(loaded.init_eqs === 'q1 = 1;', 'external expression preset maps init_eqs_eel');
-            assert(loaded.frame_eqs === 'zoom = zoom + energy * 0.1;', 'external expression preset maps frame_eqs_eel');
-            assert(loaded.pixel_eqs === 'dx = rad * 0.01;', 'external expression preset maps pixel_eqs_eel');
-            assert(loaded.baseVals.zoom === 1.01, 'external expression preset keeps baseVals');
-            assert(loaded.vertex === null, 'external expression preset leaves vertex null when unspecified');
+            assert(loaded.path === presetPath, 'external .milk preset exposes absolute path for renderer');
+            assert(typeof loaded.frame_eqs === 'string' && loaded.frame_eqs.includes('zoom=zoom+energy*0.1'),
+                'external .milk preset exposes frame_eqs');
+            assert(typeof loaded.pixel_eqs === 'string' && loaded.pixel_eqs.includes('dx=rad*0.01'),
+                'external .milk preset exposes pixel_eqs');
         } finally {
             const presetFile = Gio.File.new_for_path(presetPath);
             const dirFile = Gio.File.new_for_path(tempDir);

@@ -599,7 +599,7 @@ export class MonitorManager {
         this._settings = settings;
         this._logger = logger;
         this._gnomeShellOverride = gnomeShellOverride ?? null;
-        this._presetStore = new PresetStore({settings: this._settings, logger: this._logger});
+        this._presetStore = new PresetStore({settings: this._settings, logger: this._logger, extensionPath: this._extensionPath});
         this._evaluator = new Evaluator();
         this._audioEngine = new AudioEngine({
             settings: this._settings,
@@ -632,8 +632,6 @@ export class MonitorManager {
         this._audioReprobeDelaySupported = this._hasSettingKey('audio-reprobe-delay-ms');
         this._textOverlaySupported = this._hasSettingKey('text-overlay-enabled');
         this._showOnlyWhenMediaPlayingSupported = this._hasSettingKey('show-only-when-media-playing');
-        this._presetPathSupported = this._hasSettingKey('preset-path');
-        this._forcedPresetPath = null;
         this._sequentialRotationCursor = 0;
         this._crashTimestamps = [];
         this._lastOverlayVisible = null;
@@ -679,12 +677,6 @@ export class MonitorManager {
             this._settings.connect('changed::preset-directory', () => this._handlePresetDirectoryChanged()),
             this._settings.connect('changed::audio-source', () => this._handleAudioSettingChanged('audio-source'))
         );
-
-        if (this._presetPathSupported) {
-            this._settingsSignals.push(
-                this._settings.connect('changed::preset-path', () => this._handlePresetPathChanged())
-            );
-        }
 
         if (this._pauseWhenFullscreenSupported)
             this._settingsSignals.push(this._settings.connect('changed::pause-when-fullscreen', () => this._checkVisibility()));
@@ -997,10 +989,6 @@ export class MonitorManager {
             this._presetRotationId = 0;
         }
 
-        // If a fixed preset path is configured, don't rotate automatically.
-        if (this._getPresetPathSetting())
-            return;
-
         const intervalSec = this._getIntSetting('preset-rotation-interval', 60);
         if (intervalSec <= 0)
             return;
@@ -1022,7 +1010,10 @@ export class MonitorManager {
             if (!this._enabled || index.length <= 1)
                 return;
 
-            const nextPresetId = this._selectNextPresetId(index);
+            const fileIndex = index.filter(entry => entry?.source === 'file');
+            const rotationIndex = fileIndex.length > 0 ? fileIndex : index;
+
+            const nextPresetId = this._selectNextPresetId(rotationIndex);
             if (!this._enabled || !nextPresetId)
                 return;
 
@@ -1287,11 +1278,8 @@ export class MonitorManager {
             pcmRight: raw?.active ? (raw?.pcmRight || []) : [],
         };
 
-        // Preset path for projectM backend. Prefer fixed preset-path when set.
-        const forcedPath = this._getPresetPathSetting();
-        if (forcedPath) {
-            evaluated.presetPath = forcedPath;
-        } else if (this._currentPreset?.source === 'file' && this._currentPreset?.id?.startsWith?.('file:')) {
+        // Preset path for projectM backend.
+        if (this._currentPreset?.source === 'file' && this._currentPreset?.id?.startsWith?.('file:')) {
             evaluated.presetPath = this._currentPreset.id.replace(/^file:/, '');
         } else {
             evaluated.presetPath = undefined;
@@ -1433,29 +1421,6 @@ export class MonitorManager {
     _getPresetRotationMode() {
         const mode = this._getStringSetting('preset-rotation-mode', 'random');
         return VALID_ROTATION_MODES.has(mode) ? mode : 'random';
-    }
-
-    _getPresetPathSetting() {
-        if (!this._settings || !this._presetPathSupported)
-            return '';
-        try {
-            return this._settings.get_string('preset-path')?.trim?.() ?? '';
-        } catch (_error) {
-            return '';
-        }
-    }
-
-    _handlePresetPathChanged() {
-        const next = this._getPresetPathSetting();
-        this._forcedPresetPath = next || null;
-
-        if (this._enabled && !this._disabling && this._currentPreset) {
-            const presetForRenderer = {...this._currentPreset, path: this._forcedPresetPath};
-            for (const process of this._rendererProcesses.values())
-                process.queuePresetLoad(presetForRenderer);
-        }
-
-        this._startPresetRotation();
     }
 
     _getBooleanSetting(key, fallback) {
