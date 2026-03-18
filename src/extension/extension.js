@@ -13,6 +13,7 @@ export default class MilkdropExtension extends Extension {
                 extensionPath: this.path,
                 settings: this._settings,
                 logger,
+                gnomeShellOverride: this._gnomeShellOverride,
             });
             this._gnomeShellOverride.enable();
             this._monitorManager.enable();

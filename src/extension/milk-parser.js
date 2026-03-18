@@ -53,10 +53,7 @@ export function parseCodeBlock(content, prefix) {
     for (const line of lines) {
         const match = line.match(new RegExp(`^${prefix}(\\d+)=(.*)`));
         if (!match) {
-            if (inBlock) {
-                const num = parseInt(match?.[1] || '0');
-                if (num !== lastNum + 1) break;
-            }
+            if (inBlock) break;
             continue;
         }
 

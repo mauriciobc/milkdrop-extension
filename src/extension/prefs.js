@@ -42,15 +42,16 @@ export default class MilkdropPreferences extends ExtensionPreferences {
 
         const displayGroup = new Adw.PreferencesGroup({
             title: _('Desktop behavior'),
-            description: _('Early implementation controls for monitor visibility and frame rate.'),
+            description: _('Visibility and performance controls for running the renderer on your desktop.'),
         });
         displayPage.add(displayGroup);
 
         addSwitchRow(displayGroup, settings, 'hide-when-maximized', _('Hide when maximized'), _('Pause visual presence when a window is maximized.'));
-        addSwitchRow(displayGroup, settings, 'show-on-empty-desktop-only', _('Empty desktop only'), _('Restrict the renderer to empty-desktop scenarios later in development.'));
+        addSwitchRow(displayGroup, settings, 'show-on-empty-desktop-only', _('Empty desktop only'), _('Pause unless your desktop is empty (no normal windows visible).'));
         addSwitchRow(displayGroup, settings, 'text-overlay-enabled', _('Text overlay'), _('Show or hide status text drawn over visualizations.'));
         addSwitchRow(displayGroup, settings, 'pause-when-fullscreen', _('Pause when fullscreen'), _('Immediately pause rendering while the focused window is fullscreen.'));
-        addSpinRow(displayGroup, settings, 'fps-limit', _('FPS limit'), _('Current placeholder frame cap.'), new Gtk.Adjustment({lower: 30, upper: 240, step_increment: 1, page_increment: 10, value: 60}));
+        addSwitchRow(displayGroup, settings, 'show-only-when-media-playing', _('Only when media is playing'), _('Pause visualizations when no MPRIS player is playing. Saves CPU and GPU until you start music or video.'));
+        addSpinRow(displayGroup, settings, 'fps-limit', _('FPS limit'), _('Limit the renderer frame rate.'), new Gtk.Adjustment({lower: 30, upper: 240, step_increment: 1, page_increment: 10, value: 60}));
 
         const audioPage = new Adw.PreferencesPage({
             title: _('Audio'),
@@ -60,11 +61,11 @@ export default class MilkdropPreferences extends ExtensionPreferences {
 
         const audioGroup = new Adw.PreferencesGroup({
             title: _('Signal input'),
-            description: _('Audio and evaluator settings are scaffolded but not fully implemented yet.'),
+            description: _('Audio capture settings used for beat detection and audio-reactive visuals.'),
         });
         audioPage.add(audioGroup);
 
-        addSpinRow(audioGroup, settings, 'audio-sensitivity', _('Audio sensitivity'), _('Multiplier applied once the spectrum pipeline is active.'), new Gtk.Adjustment({lower: 0.1, upper: 3.0, step_increment: 0.1, page_increment: 0.5, value: 1.0}));
+        addSpinRow(audioGroup, settings, 'audio-sensitivity', _('Audio sensitivity'), _('Multiplier applied to audio-derived values.'), new Gtk.Adjustment({lower: 0.1, upper: 3.0, step_increment: 0.1, page_increment: 0.5, value: 1.0}));
         addEntryRow(audioGroup, settings, 'audio-source', _('Audio source'), _('Output monitor source name (for example alsa_output...monitor) or auto (never microphone fallback).'));
         addSpinRow(audioGroup, settings, 'audio-restart-max-attempts', _('Audio restart max attempts'), _('Applies after audio pipeline restart/reprobe.'), new Gtk.Adjustment({lower: 0, upper: 100, step_increment: 1, page_increment: 5, value: 3}));
         addSpinRow(audioGroup, settings, 'audio-reprobe-delay-ms', _('Audio reprobe delay (ms)'), _('Applies after audio pipeline restart/reprobe.'), new Gtk.Adjustment({lower: 250, upper: 120000, step_increment: 50, page_increment: 500, value: 2500}));
@@ -96,10 +97,11 @@ export default class MilkdropPreferences extends ExtensionPreferences {
         addSpinRow(advancedGroup, settings, 'beat-cut-cooldown-sec', _('Beat-cut cooldown (sec)'), _('Minimum seconds between beat-triggered preset cuts (applies immediately).'), new Gtk.Adjustment({lower: 0.0, upper: 30.0, step_increment: 0.1, page_increment: 0.5, value: 2.0}));
         addSpinRow(advancedGroup, settings, 'blend-time', _('Blend time'), _('Seconds used for preset blending.'), new Gtk.Adjustment({lower: 0.0, upper: 10.0, step_increment: 0.1, page_increment: 0.5, value: 2.0}));
         addEntryRow(advancedGroup, settings, 'preset-directory', _('Preset directory'), _('Optional external preset path.'));
+        addEntryRow(advancedGroup, settings, 'preset-path', _('Preset path'), _('Optional preset file path (usually a .milk). When set, automatic rotation is paused.'));
 
         const statusRow = new Adw.ActionRow({
             title: _('Scaffold status'),
-            subtitle: _('Local-first GNOME 47-49 scaffold with standalone renderer placeholder.'),
+            subtitle: _('Local-first GNOME 47-49 extension with a split-process renderer.'),
         });
         aboutGroup.add(statusRow);
     }

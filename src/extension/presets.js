@@ -1,7 +1,7 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
-
+import { compile } from './expr/compiler.js';
 
 const VALID_WARP_TYPES = new Set(['radial', 'angular', 'wave']);
 const VALID_WAVEFORMS = new Set(['sin', 'cos']);
@@ -448,6 +448,49 @@ function sanitiseCustomShapes(raw) {
     return shapes;
 }
 
+/**
+ * Validate that all expression strings in a preset parse and compile.
+ * Used to skip presets that use unsupported syntax (e.g. semicolon inside
+ * parentheses, assignment in invalid context).
+ * @param {object} preset - Sanitised preset with init_eqs, frame_eqs, pixel_eqs, customWaves, customShapes
+ * @returns {boolean} - true if all expressions are valid, false otherwise
+ */
+function validatePresetExpressions(preset) {
+    if (!preset || typeof preset !== 'object')
+        return true;
+    try {
+        const compileIfNonEmpty = (src) => {
+            if (typeof src === 'string' && src.trim())
+                compile(src);
+        };
+        compileIfNonEmpty(preset.init_eqs);
+        compileIfNonEmpty(preset.frame_eqs);
+        compileIfNonEmpty(preset.pixel_eqs);
+        const waves = preset.customWaves;
+        if (Array.isArray(waves)) {
+            for (let i = 0; i < waves.length; i++) {
+                const w = waves[i];
+                if (!w) continue;
+                compileIfNonEmpty(w.init_eqs);
+                compileIfNonEmpty(w.frame_eqs);
+                compileIfNonEmpty(w.point_eqs);
+            }
+        }
+        const shapes = preset.customShapes;
+        if (Array.isArray(shapes)) {
+            for (let i = 0; i < shapes.length; i++) {
+                const s = shapes[i];
+                if (!s) continue;
+                compileIfNonEmpty(s.init_eqs);
+                compileIfNonEmpty(s.frame_eqs);
+            }
+        }
+        return true;
+    } catch (_e) {
+        return false;
+    }
+}
+
 function sanitisePreset(raw, filePath) {
     if (!raw || typeof raw !== 'object')
         return null;
@@ -532,6 +575,9 @@ export class PresetStore {
         this._externalPresets = [];
         this._externalLoaded = false;
         this._lastPresetDirectory = null;
+        this._externalLoadPromise = null;
+        this._loadingPresetDirectory = null;
+        this._externalLoadToken = 0;
     }
 
     async loadIndex() {
@@ -558,6 +604,9 @@ export class PresetStore {
     }
 
     invalidateCache() {
+        this._externalLoadToken += 1;
+        this._externalLoadPromise = null;
+        this._loadingPresetDirectory = null;
         this._externalLoaded = false;
         this._externalPresets = [];
         this._lastPresetDirectory = null;
@@ -573,56 +622,144 @@ export class PresetStore {
         if (this._externalLoaded && dirPath === this._lastPresetDirectory)
             return;
 
-        this._externalLoaded = true;
-        this._externalPresets = [];
-        this._lastPresetDirectory = dirPath;
-
-        if (!dirPath)
+        if (this._externalLoadPromise && this._loadingPresetDirectory === dirPath) {
+            await this._externalLoadPromise;
             return;
+        }
+
+        this._externalLoadToken += 1;
+        const token = this._externalLoadToken;
+        this._loadingPresetDirectory = dirPath;
+        this._externalLoaded = false;
+        this._externalPresets = [];
+        this._lastPresetDirectory = null;
+
+        const loadPromise = this._loadExternalPresetsAsync(dirPath, token);
+        this._externalLoadPromise = loadPromise;
+        try {
+            await loadPromise;
+        } finally {
+            if (this._externalLoadPromise === loadPromise) {
+                this._externalLoadPromise = null;
+                this._loadingPresetDirectory = null;
+            }
+        }
+    }
+
+    async _loadExternalPresetsAsync(dirPath, token) {
+        if (!dirPath) {
+            this._commitExternalPresets(dirPath, [], token);
+            return;
+        }
 
         const expanded = dirPath.startsWith('~')
             ? GLib.build_filenamev([GLib.get_home_dir(), dirPath.slice(1)])
             : dirPath;
 
         const dir = Gio.File.new_for_path(expanded);
-        if (!dir.query_exists(null)) {
-            this._logger.debug?.(`milkdrop preset directory does not exist: ${expanded}`);
-            return;
-        }
+        const presets = [];
+        let enumerator = null;
 
         try {
-            const enumerator = dir.enumerate_children(
-                'standard::name,standard::type',
-                Gio.FileQueryInfoFlags.NONE,
-                null
-            );
+            enumerator = await this._enumerateChildrenAsync(dir);
+            while (true) {
+                const files = await this._nextFilesAsync(enumerator, 32);
+                if (!files || files.length === 0)
+                    break;
 
-            let fileInfo;
-            while ((fileInfo = enumerator.next_file(null)) !== null) {
-                const name = fileInfo.get_name();
-                if (!name.endsWith('.json'))
-                    continue;
+                for (const fileInfo of files) {
+                    const name = fileInfo.get_name();
+                    if (!name.endsWith('.json'))
+                        continue;
 
-                if (fileInfo.get_file_type() !== Gio.FileType.REGULAR)
-                    continue;
+                    if (fileInfo.get_file_type() !== Gio.FileType.REGULAR)
+                        continue;
 
-                const child = dir.get_child(name);
-                this._loadPresetFile(child, name);
+                    const child = dir.get_child(name);
+                    const preset = await this._loadPresetFileAsync(child, name);
+                    if (preset)
+                        presets.push(preset);
+                }
             }
-
-            enumerator.close(null);
         } catch (error) {
-            this._logger.warn?.(`milkdrop failed to scan preset directory: ${error.message}`);
+            if (error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_FOUND) ||
+                error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_DIRECTORY)) {
+                this._logger.debug?.(`milkdrop preset directory does not exist or is not a directory: ${expanded}`);
+            } else {
+                this._logger.warn?.(`milkdrop failed to scan preset directory: ${error.message}`);
+            }
+        } finally {
+            try {
+                enumerator?.close(null);
+            } catch (_e) {}
         }
+
+        this._commitExternalPresets(dirPath, presets, token);
+    }
+
+    _commitExternalPresets(dirPath, presets, token) {
+        if (token !== this._externalLoadToken)
+            return;
+
+        this._externalLoaded = true;
+        this._externalPresets = presets;
+        this._lastPresetDirectory = dirPath;
 
         if (this._externalPresets.length > 0)
             this._logger.info?.(`milkdrop loaded ${this._externalPresets.length} external preset(s)`);
     }
 
-    _loadPresetFile(file, filename) {
+    _enumerateChildrenAsync(dir) {
+        return new Promise((resolve, reject) => {
+            dir.enumerate_children_async(
+                'standard::name,standard::type',
+                Gio.FileQueryInfoFlags.NONE,
+                GLib.PRIORITY_DEFAULT,
+                null,
+                (file, result) => {
+                    try {
+                        resolve(file.enumerate_children_finish(result));
+                    } catch (error) {
+                        reject(error);
+                    }
+                }
+            );
+        });
+    }
+
+    _nextFilesAsync(enumerator, max = 32) {
+        return new Promise((resolve, reject) => {
+            enumerator.next_files_async(max, GLib.PRIORITY_DEFAULT, null, (source, result) => {
+                try {
+                    resolve(source.next_files_finish(result));
+                } catch (error) {
+                    reject(error);
+                }
+            });
+        });
+    }
+
+    _loadContentsAsync(file) {
+        return new Promise((resolve, reject) => {
+            file.load_contents_async(null, (source, result) => {
+                try {
+                    const [ok, contents] = source.load_contents_finish(result);
+                    if (!ok) {
+                        resolve(null);
+                        return;
+                    }
+                    resolve(contents);
+                } catch (error) {
+                    reject(error);
+                }
+            });
+        });
+    }
+
+    async _loadPresetFileAsync(file, filename) {
         try {
-            const [ok, contents] = file.load_contents(null);
-            if (!ok)
+            const contents = await this._loadContentsAsync(file);
+            if (!contents)
                 return;
 
             const text = new TextDecoder().decode(contents);
@@ -630,12 +767,17 @@ export class PresetStore {
             const preset = sanitisePreset(raw, filename);
             if (!preset) {
                 this._logger.debug?.(`milkdrop skipping invalid preset file: ${filename}`);
-                return;
+                return null;
+            }
+            if (!validatePresetExpressions(preset)) {
+                this._logger.debug?.(`milkdrop skipping preset with invalid expressions: ${filename}`);
+                return null;
             }
 
-            this._externalPresets.push(preset);
+            return preset;
         } catch (error) {
             this._logger.debug?.(`milkdrop failed to load preset ${filename}: ${error.message}`);
+            return null;
         }
     }
 

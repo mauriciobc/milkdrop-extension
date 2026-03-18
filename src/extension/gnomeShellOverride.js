@@ -1,5 +1,6 @@
 /* eslint-disable no-invalid-this */
 
+import Clutter from 'gi://Clutter';
 import GObject from 'gi://GObject';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
@@ -25,6 +26,23 @@ export class GnomeShellOverride {
         this._logger = logger;
         this._injectionManager = new InjectionManager();
         this._wallpaperActors = new Set();
+    }
+
+    /** Called by MonitorManager when "only when media playing" changes visibility. */
+    setMediaOverlayVisibility(visible) {
+        const opacity = visible ? 255 : 0;
+        const duration = 400;
+        const mode = Clutter.AnimationMode.EASE_OUT_QUAD;
+        for (const actor of this._wallpaperActors) {
+            try {
+                if (GObject.Object.prototype.toString.call(actor).includes('DISPOSED'))
+                    continue;
+                if (visible && typeof actor.ease === 'function')
+                    actor.ease({ opacity, duration, mode });
+                else
+                    actor.opacity = opacity;
+            } catch (_e) {}
+        }
     }
 
     enable() {

@@ -49,9 +49,6 @@ bench:
 visual-expr preset="0":
     gjs -m tests/visual-expr.js --preset {{preset}}
 
-compliance preset="0":
-    gjs -m tests/visual-compliance.js --preset {{preset}}
-
 bench-json:
     gjs -m tests/bench/run.js -- --json
 

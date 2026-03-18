@@ -181,9 +181,65 @@ The GL helper emits per-frame timing on stdout as JSON:
     {"type":"frame-stat","frame_count":1234,"time":20.500000,"render_us":450,"readback_us":1200}
 
 - `render_us`: time for draw+warp+composite passes (after `glFinish`)
-- `readback_us`: time for `glReadPixels` + SHM/base64 transfer
+- `readback_us`: tempo de `glReadPixels` + entrega via SHM/FD
 
 The renderer's `PerfCollector` (in `src/renderer/gl-bridge.js`) aggregates these into rolling percentile statistics accessible via `GlBridge.getPerfStats()`.
+
+### Debugging system hang
+
+If the system hangs after the extension has been running for a while, the cause is usually the **main loop of gnome-shell** being blocked (the extension runs inside it). Less often it is a GPU/driver or kernel issue.
+
+**1. Reproduce in a nested session (recommended)**
+
+So that a hang doesn’t freeze your real session:
+
+```bash
+dbus-run-session gnome-shell --devkit --wayland
+```
+
+Enable the extension inside the nested session and use it until the hang occurs. When the nested shell hangs, your main session stays usable and you can inspect processes and logs.
+
+**2. See where it stops**
+
+- **Logs:** Before reproducing, enable debug logs and follow them in another terminal:
+
+  ```bash
+  G_MESSAGES_DEBUG=all journalctl -f -o cat /usr/bin/gnome-shell
+  ```
+
+  When the hang happens, the last repeated line often points at the component that’s stuck (e.g. frame-pump, IPC, audio).
+
+- **Slow-frame warning:** Run with `MILKDROP_DEBUG_HANG=1`. The extension will log a warning whenever a single frame pump or the evaluator takes longer than 50 ms. If you see these warnings increasing in frequency before a hang, the main loop is being blocked by the frame path (evaluator or IPC/serialization).
+
+**3. Profile with Sysprof**
+
+Capture a session that includes the hang (or the slowdown that precedes it):
+
+```bash
+just profile
+# or:
+sysprof-cli --session -- dbus-run-session gnome-shell --devkit --wayland
+```
+
+Enable the extension, use it until it hangs or slows down, then stop with Ctrl+C. Open the generated `.syscap` in Sysprof and check:
+
+- **gnome-shell:** Where CPU time is spent (e.g. `frame-pump`, `evaluator`, JSON, GStreamer). Long blocks on one callback = main loop blocked.
+- **Renderer / gl-helper:** If the renderer or C helper is stuck, the shell may still be responsive; the gl-bridge watchdog will restart the helper after ~25 s. If the whole system freezes, focus on the shell or the driver.
+
+**4. Likely causes and what to check**
+
+| Symptom | Likely cause | What to check |
+| --- | --- | --- |
+| Last log line is frame-pump / evaluator | Evaluator or preset too heavy; main loop blocked every frame | Preset complexity, `evaluateFrame()` duration in Sysprof, try disabling preset rotation or switching to a simpler preset |
+| Last log is IPC or socket write | Renderer not reading; socket buffer full; write path blocking | Renderer process state (`pgrep -a gjs`), IPC queue (extension drops frames when queue is full; see `MILKDROP_DEBUG_IPC=1`) |
+| Last log is audio / GStreamer | Audio pipeline or D-Bus blocking | `MILKDROP_DEBUG_IPC=1`, audio source, PulseAudio/PipeWire |
+| Visualization freezes but shell still responds | Renderer or GL helper stuck | Renderer watchdog (restart after 25 s), `gl-helper` stdout, GPU driver |
+
+**5. Isolate components**
+
+- **Without audio:** Disable or close audio source; if the hang stops, the problem is likely in the audio pipeline or in code that runs only when audio is active.
+- **Without preset rotation:** Set preset rotation interval to 0; if the hang stops, suspect preset loading/indexing or evaluator preset switch.
+- **Renderer only:** Run `just renderer` (standalone renderer, no extension). If the system never hangs, the cause is probably in the extension (shell) side.
 
 ### Environment variables
 
@@ -191,6 +247,7 @@ The renderer's `PerfCollector` (in `src/renderer/gl-bridge.js`) aggregates these
 | --- | --- |
 | `MILKDROP_DEBUG_IPC=1` | Log frame writes and audio data every ~1s |
 | `MILKDROP_DEBUG_BEAT=1` | Log beat detection decisions |
+| `MILKDROP_DEBUG_HANG=1` | Warn when a frame pump or evaluator run exceeds 50 ms (main-loop blocking) |
 | `MILKDROP_PERF_MARKS=1` | Enable shell-side perf marks without Sysprof |
 | `SYSPROF_TRACE_FD` | Set automatically by Sysprof; enables mark emission |
 

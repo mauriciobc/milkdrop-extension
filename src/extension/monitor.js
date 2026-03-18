@@ -1,3 +1,4 @@
+import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
@@ -10,17 +11,38 @@ import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
 import {AudioEngine} from './audio.js';
 import {Evaluator} from './evaluator.js';
 import {IpcServer} from './ipc.js';
+import {MprisWatcher} from './mpris-watcher.js';
 import {perfBegin, perfEnd} from './perf.js';
 import {PresetStore} from './presets.js';
 import {parseRendererWindowTitle, RENDERER_TITLE_PREFIX} from './windowTitle.js';
 
 const HOTPLUG_RESTART_DEBOUNCE_MS = 150;
+const MAX_CONSECUTIVE_CRASHES = 5;
+const CRASH_WINDOW_MS = 30000;
 const NOTIFICATION_COOLDOWN_MS = 10000;
 const DEFAULT_BEAT_CUT_COOLDOWN_SEC = 2.0;
+const MEDIA_OVERLAY_FADE_MS = 400;
 const VALID_ROTATION_MODES = new Set(['random', 'sequential']);
+/** When MILKDROP_DEBUG_HANG=1, warn if frame pump or evaluator exceeds this (µs). */
+const SLOW_FRAME_THRESHOLD_US = 50000;
+
+const DBUS_STATUS_NAME = 'io.github.mauriciobc.Milkdrop';
+const DBUS_STATUS_PATH = '/io/github/mauriciobc/Milkdrop';
+const DBUS_STATUS_INTERFACE_XML = `
+<node>
+  <interface name="io.github.mauriciobc.Milkdrop">
+    <method name="GetWindowStatus">
+      <arg type="a{sv}" direction="out" name="status"/>
+    </method>
+  </interface>
+</node>`;
 
 function _debugIpc() {
     return GLib.getenv('MILKDROP_DEBUG_IPC') === '1';
+}
+
+function _debugHang() {
+    return GLib.getenv('MILKDROP_DEBUG_HANG') === '1';
 }
 
 function _isDisposed(obj) {
@@ -455,15 +477,8 @@ class RendererProcess {
             id: preset.id,
             name: preset.name,
             source: preset.source,
+            path: preset.path ?? null,
             frame: preset.frame,
-            vertex: preset.vertex ?? null,
-            shaders: preset.shaders ?? null,
-            baseVals: preset.baseVals,
-            init_eqs: preset.init_eqs,
-            frame_eqs: preset.frame_eqs,
-            pixel_eqs: preset.pixel_eqs,
-            shapes: preset.shapes,
-            waves: preset.waves,
         } : null;
         this._lastQueuedPreset = this._pendingPresetLoad;
         this._flushPendingPresetLoad();
@@ -476,7 +491,7 @@ class RendererProcess {
     }
 
     _handleIpcMessage(message) {
-        if (this._stopping)
+        if (this._stopping || !message || typeof message !== 'object')
             return;
 
         switch (message.type) {
@@ -579,10 +594,11 @@ class RendererProcess {
 }
 
 export class MonitorManager {
-    constructor({extensionPath, settings, logger}) {
+    constructor({extensionPath, settings, logger, gnomeShellOverride = null}) {
         this._extensionPath = extensionPath;
         this._settings = settings;
         this._logger = logger;
+        this._gnomeShellOverride = gnomeShellOverride ?? null;
         this._presetStore = new PresetStore({settings: this._settings, logger: this._logger});
         this._evaluator = new Evaluator();
         this._audioEngine = new AudioEngine({
@@ -615,7 +631,22 @@ export class MonitorManager {
         this._audioRestartMaxAttemptsSupported = this._hasSettingKey('audio-restart-max-attempts');
         this._audioReprobeDelaySupported = this._hasSettingKey('audio-reprobe-delay-ms');
         this._textOverlaySupported = this._hasSettingKey('text-overlay-enabled');
+        this._showOnlyWhenMediaPlayingSupported = this._hasSettingKey('show-only-when-media-playing');
+        this._presetPathSupported = this._hasSettingKey('preset-path');
+        this._forcedPresetPath = null;
         this._sequentialRotationCursor = 0;
+        this._crashTimestamps = [];
+        this._lastOverlayVisible = null;
+        this._dbusOwnerId = 0;
+        this._dbusExportedObject = null;
+
+        this._mprisWatcher = new MprisWatcher({
+            logger: this._logger,
+            onPlayingChanged: () => {
+                if (this._enabled && !this._disabling)
+                    this._checkVisibility();
+            },
+        });
 
         this._evaluator.loadPreset(this._currentPreset);
     }
@@ -624,6 +655,8 @@ export class MonitorManager {
         this._enabled = true;
         this._disabling = false;
         this._paused = false;
+        this._crashTimestamps = [];
+        this._lastOverlayVisible = null;
 
         this._monitorSignals.push({
             owner: Main.layoutManager,
@@ -647,8 +680,17 @@ export class MonitorManager {
             this._settings.connect('changed::audio-source', () => this._handleAudioSettingChanged('audio-source'))
         );
 
+        if (this._presetPathSupported) {
+            this._settingsSignals.push(
+                this._settings.connect('changed::preset-path', () => this._handlePresetPathChanged())
+            );
+        }
+
         if (this._pauseWhenFullscreenSupported)
             this._settingsSignals.push(this._settings.connect('changed::pause-when-fullscreen', () => this._checkVisibility()));
+
+        if (this._showOnlyWhenMediaPlayingSupported)
+            this._settingsSignals.push(this._settings.connect('changed::show-only-when-media-playing', () => this._checkVisibility()));
 
         if (this._presetRotationModeSupported) {
             this._settingsSignals.push(
@@ -698,11 +740,18 @@ export class MonitorManager {
             if (!this._enabled || this._disabling)
                 return GLib.SOURCE_REMOVE;
             this._audioEngine.enable();
-            this._spawnForCurrentMonitors();
+            this._mprisWatcher.enable();
+            this._exportDbusStatus();
+            // When "only when media playing" is on, don't spawn until there's playback — avoids showing fallback at all
+            const showOnlyWhenMedia = this._getBooleanSetting('show-only-when-media-playing', false);
+            const shouldShowNow = !showOnlyWhenMedia || this._mprisWatcher?.hasActivePlayback;
+            if (shouldShowNow)
+                this._spawnForCurrentMonitors();
             this._applyTextOverlaySetting();
             this._startFramePump();
             this._startPresetRotation();
             this._checkHelperAvailability();
+            this._checkVisibility();
             return GLib.SOURCE_REMOVE;
         });
     }
@@ -779,17 +828,37 @@ export class MonitorManager {
             this._presetRotationId = 0;
         }
 
+        this._unexportDbusStatus();
+        this._mprisWatcher?.disable();
         this._clearManagedWindows();
         this._stopAll();
         this._evaluator.destroy();
+        this._crashTimestamps = [];
+        this._lastOverlayVisible = null;
         this._disabling = false;
     }
 
     _onRendererExit(monitorIndex) {
+        const process = this._rendererProcesses.get(monitorIndex);
+        process?.stop();
         this._rendererProcesses.delete(monitorIndex);
         this._spawnedMonitorFingerprints.delete(monitorIndex);
-        if (this._enabled && !this._disabling)
-            this._scheduleRestart('renderer-exit');
+        if (!this._enabled || this._disabling)
+            return;
+
+        const now = GLib.get_monotonic_time() / 1000;
+        this._crashTimestamps.push(now);
+        const windowStart = now - CRASH_WINDOW_MS;
+        this._crashTimestamps = this._crashTimestamps.filter(t => t >= windowStart);
+
+        if (this._crashTimestamps.length >= MAX_CONSECUTIVE_CRASHES) {
+            this._logger.warn?.(
+                `milkdrop: ${this._crashTimestamps.length} crashes in ${CRASH_WINDOW_MS / 1000}s — stopping restart attempts`
+            );
+            return;
+        }
+
+        this._scheduleRestart('renderer-exit');
     }
 
     _scheduleRestart(reason) {
@@ -805,6 +874,8 @@ export class MonitorManager {
             this._restartAll();
             return GLib.SOURCE_REMOVE;
         });
+        if (!this._restartTimeoutId)
+            this._logger.warn?.('milkdrop failed to schedule renderer restart');
     }
 
     _restartAll() {
@@ -906,7 +977,10 @@ export class MonitorManager {
                     }
                 }
 
+                const pumpEndUs = GLib.get_monotonic_time();
                 perfEnd(pumpToken);
+                if (_debugHang() && pumpToken && (pumpEndUs - pumpToken.start) > SLOW_FRAME_THRESHOLD_US)
+                    this._logger.warn?.(`milkdrop [extension] slow frame pump: ${((pumpEndUs - pumpToken.start) / 1000).toFixed(1)}ms (may block main loop)`);
             } catch (outerError) {
                 this._logger.warn?.(`milkdrop frame pump critical error: ${outerError.message}`);
             }
@@ -922,6 +996,10 @@ export class MonitorManager {
             GLib.source_remove(this._presetRotationId);
             this._presetRotationId = 0;
         }
+
+        // If a fixed preset path is configured, don't rotate automatically.
+        if (this._getPresetPathSetting())
+            return;
 
         const intervalSec = this._getIntSetting('preset-rotation-interval', 60);
         if (intervalSec <= 0)
@@ -980,13 +1058,13 @@ export class MonitorManager {
 
     _applyPreset(preset, reason = 'updated') {
         try {
-            this._currentPreset = preset;
             const blendTime = Math.max(0, this._getDoubleSetting('blend-time', 0));
             this._evaluator.loadPreset(preset, blendTime);
 
             for (const process of this._rendererProcesses.values())
                 process.queuePresetLoad(preset);
 
+            this._currentPreset = preset;
             this._logger.info?.(`milkdrop [TEST] Loading preset ID: ${preset.id} - Name: ${preset.name} - Reason: ${reason}`);
         } catch (error) {
             this._logger.warn?.(`milkdrop failed to apply preset "${preset?.name ?? 'unknown'}": ${error.message}`);
@@ -1005,6 +1083,8 @@ export class MonitorManager {
 
         try {
             const reloaded = await this._presetStore.loadPreset(this._currentPreset.id);
+            if (!this._enabled || this._disabling)
+                return;
             this._applyPreset(reloaded, 'reloaded after preset directory change');
         } catch (_error) {
             const fallbackPreset = this._presetStore.getBootstrapPreset();
@@ -1060,7 +1140,118 @@ export class MonitorManager {
                 shouldPause = true;
         }
 
+        const showOnlyWhenMedia = this._getBooleanSetting('show-only-when-media-playing', false);
+        if (showOnlyWhenMedia && !shouldPause) {
+            if (!this._mprisWatcher?.hasActivePlayback)
+                shouldPause = true;
+        }
+
         this._paused = shouldPause;
+        this._applyMediaOverlayVisibility();
+
+        // Spawn when overlay should be visible but we have no renderers yet (e.g. first playback with "only when media", or setting turned off after deferred spawn)
+        const overlayVisible = !showOnlyWhenMedia || this._mprisWatcher?.hasActivePlayback;
+        if (overlayVisible && this._rendererProcesses.size === 0)
+            this._spawnForCurrentMonitors();
+    }
+
+    _applyMediaOverlayVisibility() {
+        if (!this._enabled || this._disabling)
+            return;
+        const showOnlyWhenMedia = this._getBooleanSetting('show-only-when-media-playing', false);
+        const visible = !showOnlyWhenMedia || this._mprisWatcher?.hasActivePlayback;
+        if (visible === this._lastOverlayVisible)
+            return;
+        this._lastOverlayVisible = visible;
+        const targetOpacity = visible ? 255 : 0;
+        const duration = MEDIA_OVERLAY_FADE_MS;
+        const mode = Clutter.AnimationMode.EASE_OUT_QUAD;
+
+        /* Use opacity-only on the window actor — never set visible=false.
+         * Setting visible=false on a Meta.WindowActor stops Mutter from
+         * updating the compositor texture, which breaks the Clutter.Clone
+         * inside LiveWallpaper (it would show a stale/black frame on re-show).
+         * opacity=0 hides it visually while keeping texture updates running. */
+        let matchCount = 0;
+        for (const [metaWindow] of this._managedWindows) {
+            try {
+                const actor = metaWindow.get_compositor_private?.();
+                if (!actor || _isDisposed(actor))
+                    continue;
+                matchCount++;
+                if (targetOpacity === 0) {
+                    actor.remove_all_transitions?.();
+                    actor.opacity = 0;
+                } else if (typeof actor.ease === 'function') {
+                    actor.ease({ opacity: 255, duration, mode });
+                } else {
+                    actor.opacity = 255;
+                }
+            } catch (_e) {}
+        }
+
+        this._logger.warn?.(`milkdrop applyVisibility: visible=${visible} matchedWindows=${matchCount} managedWindows=${this._managedWindows.size}`);
+        this._gnomeShellOverride?.setMediaOverlayVisibility?.(visible);
+    }
+
+    /**
+     * D-Bus: return current window/overlay status (a{sv}).
+     * Used by io.github.mauriciobc.Milkdrop.GetWindowStatus.
+     */
+    GetWindowStatus() {
+        const showOnlyWhenMedia = this._getBooleanSetting('show-only-when-media-playing', false);
+        const hasActivePlayback = !!this._mprisWatcher?.hasActivePlayback;
+        const overlayVisible = !showOnlyWhenMedia || hasActivePlayback;
+        const titles = [];
+        for (const [metaWindow] of this._managedWindows) {
+            try {
+                if (metaWindow?.get_title)
+                    titles.push(metaWindow.get_title());
+            } catch (e) {
+                this._logger.debug?.(`milkdrop GetWindowStatus: skipped disposed window: ${e.message}`);
+            }
+        }
+        const status = {
+            Paused: GLib.Variant.new_boolean(this._paused),
+            OverlayVisible: GLib.Variant.new_boolean(overlayVisible),
+            ShowOnlyWhenMediaPlaying: GLib.Variant.new_boolean(showOnlyWhenMedia),
+            HasActivePlayback: GLib.Variant.new_boolean(hasActivePlayback),
+            RendererCount: GLib.Variant.new_uint32(this._rendererProcesses.size),
+            WindowTitles: GLib.Variant.new_strv(titles),
+        };
+        return new GLib.Variant('a{sv}', status);
+    }
+
+    _exportDbusStatus() {
+        if (this._dbusOwnerId)
+            return;
+        this._dbusOwnerId = Gio.bus_own_name(
+            Gio.BusType.SESSION,
+            DBUS_STATUS_NAME,
+            Gio.BusNameOwnerFlags.NONE,
+            (connection) => {
+                this._dbusExportedObject = Gio.DBusExportedObject.wrapJSObject(
+                    DBUS_STATUS_INTERFACE_XML,
+                    this
+                );
+                this._dbusExportedObject.export(connection, DBUS_STATUS_PATH);
+            },
+            () => {},
+            () => { this._logger.warn?.('milkdrop D-Bus status name lost or could not be acquired'); }
+        );
+    }
+
+    _unexportDbusStatus() {
+        if (this._dbusExportedObject) {
+            try {
+                this._dbusExportedObject.unexport();
+            } catch (_e) {}
+            this._dbusExportedObject = null;
+        }
+        if (this._dbusOwnerId) {
+            Gio.bus_unown_name(this._dbusOwnerId);
+            this._dbusOwnerId = 0;
+        }
     }
 
     _buildFrameState(monitorIndex, fpsLimit) {
@@ -1075,7 +1266,10 @@ export class MonitorManager {
 
         const evalToken = perfBegin('evaluator');
         const evaluated = this._evaluator.evaluateFrame(baseFrameState);
+        const evalEndUs = GLib.get_monotonic_time();
         perfEnd(evalToken);
+        if (_debugHang() && evalToken && (evalEndUs - evalToken.start) > SLOW_FRAME_THRESHOLD_US)
+            this._logger.warn?.(`milkdrop [extension] slow evaluator: ${((evalEndUs - evalToken.start) / 1000).toFixed(1)}ms (may block main loop)`);
 
         // Guarantee a plain, JSON-serializable audio object so the renderer always receives audio data
         const raw = evaluated.audio ?? this._audioEngine.getFeatures();
@@ -1089,9 +1283,19 @@ export class MonitorManager {
             beat: Number(raw?.beat ?? 0),
             decay: Number(raw?.decay ?? 0),
             waveData: raw?.waveData || [],
-            pcmLeft: raw?.pcmLeft || [],
-            pcmRight: raw?.pcmRight || [],
+            pcmLeft: raw?.active ? (raw?.pcmLeft || []) : [],
+            pcmRight: raw?.active ? (raw?.pcmRight || []) : [],
         };
+
+        // Preset path for projectM backend. Prefer fixed preset-path when set.
+        const forcedPath = this._getPresetPathSetting();
+        if (forcedPath) {
+            evaluated.presetPath = forcedPath;
+        } else if (this._currentPreset?.source === 'file' && this._currentPreset?.id?.startsWith?.('file:')) {
+            evaluated.presetPath = this._currentPreset.id.replace(/^file:/, '');
+        } else {
+            evaluated.presetPath = undefined;
+        }
 
         // Beat-cut: trigger immediate preset rotation on beat if enabled
         // Cooldown is configurable for beat-cut behavior.
@@ -1135,6 +1339,7 @@ export class MonitorManager {
             });
             process?.markWindowManaged();
             this._managedWindows.set(window, {managedWindow, unmanagedId, process});
+            this._applyMediaOverlayVisibility();
         } catch (error) {
             this._managedWindows.delete(window);
             this._logger.debug?.(`milkdrop failed to configure mapped window: ${error.message}`);
@@ -1200,15 +1405,24 @@ export class MonitorManager {
         if (!entry)
             return;
 
-        if (entry.unmanagedId) {
+        // Remove from map immediately so we don't double-process if re-entered.
+        this._managedWindows.delete(window);
+
+        // Defer disconnect and cleanup. Calling window.disconnect(entry.unmanagedId) from
+        // within the 'unmanaged' signal callback causes g_closure_unref double-unref
+        // (the emission holds a ref; we unref on disconnect; emission unrefs again).
+        const capturedWindow = window;
+        const capturedEntry = entry;
+        GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
             try {
-                window.disconnect(entry.unmanagedId);
+                if (capturedEntry.unmanagedId && !_isDisposed(capturedWindow))
+                    capturedWindow.disconnect(capturedEntry.unmanagedId);
             } catch (_error) {
             }
-        }
-        entry.managedWindow?.disconnect?.();
-        entry.process?.clearWindowManaged?.();
-        this._managedWindows.delete(window);
+            capturedEntry.managedWindow?.disconnect?.();
+            capturedEntry.process?.clearWindowManaged?.();
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     _clearManagedWindows() {
@@ -1219,6 +1433,29 @@ export class MonitorManager {
     _getPresetRotationMode() {
         const mode = this._getStringSetting('preset-rotation-mode', 'random');
         return VALID_ROTATION_MODES.has(mode) ? mode : 'random';
+    }
+
+    _getPresetPathSetting() {
+        if (!this._settings || !this._presetPathSupported)
+            return '';
+        try {
+            return this._settings.get_string('preset-path')?.trim?.() ?? '';
+        } catch (_error) {
+            return '';
+        }
+    }
+
+    _handlePresetPathChanged() {
+        const next = this._getPresetPathSetting();
+        this._forcedPresetPath = next || null;
+
+        if (this._enabled && !this._disabling && this._currentPreset) {
+            const presetForRenderer = {...this._currentPreset, path: this._forcedPresetPath};
+            for (const process of this._rendererProcesses.values())
+                process.queuePresetLoad(presetForRenderer);
+        }
+
+        this._startPresetRotation();
     }
 
     _getBooleanSetting(key, fallback) {

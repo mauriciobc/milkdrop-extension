@@ -15,7 +15,6 @@ This document captures the requirements for a set of targeted code-hygiene fixes
 - **ManagedRendererWindow**: The inner class in `src/extension/monitor.js` that manages window placement for a renderer.
 - **PerPixelEvaluator**: The class in `src/extension/expr/per-pixel.js` that evaluates MilkDrop per-pixel expressions at each mesh vertex.
 - **PresetStore**: The class in `src/extension/presets.js` that loads and sanitises preset JSON files.
-- **VertexEvaluator**: The class in `src/renderer/vertex-eval.js` that evaluates per-vertex warp for the mesh.
 - **RENDER_CONTROL_DEFAULTS**: The ~35-key object of default render-control values in `src/extension/evaluator.js`.
 - **FRAME_RENDER_CONTROL_DEFAULTS**: The verbatim duplicate of the above in `src/renderer/gl-bridge.js`.
 - **frameCtx**: The per-frame expression context object passed through the expression evaluator pipeline.
@@ -82,18 +81,6 @@ This document captures the requirements for a set of targeted code-hygiene fixes
 
 ---
 
-### Requirement 5 — Consistent VertexEvaluator Return Type
-
-**User Story:** As a developer, I want `VertexEvaluator.evaluate()` to always return the same type, so that callers do not need to branch on `Array.isArray` to handle two different contracts.
-
-#### Acceptance Criteria
-
-1. THE `VertexEvaluator.evaluate()` method SHALL always return a plain object with at minimum `u` and `v` numeric properties, regardless of which internal path (expression-based or legacy WaveSpec) is taken.
-2. WHEN the legacy WaveSpec path is taken, THE VertexEvaluator SHALL return an object `{ u, v }` rather than a two-element array `[u, v]`.
-3. WHEN `applyWarpToMesh` in `src/renderer/mesh.js` receives the result of `evalVertex`, THE function SHALL handle only the object form and SHALL NOT contain an `Array.isArray` branch for the return value of `VertexEvaluator.evaluate()`.
-
----
-
 ### Requirement 6 — Restore Full Per-Pixel Context After Evaluation
 
 **User Story:** As a developer, I want `PerPixelEvaluator.evaluate()` to fully restore the shared `frameCtx` after each vertex evaluation, so that per-pixel side effects do not leak into subsequent vertices or per-frame state.
@@ -102,17 +89,6 @@ This document captures the requirements for a set of targeted code-hygiene fixes
 
 1. WHEN `PerPixelEvaluator.evaluate()` sets `x`, `y`, `rad`, and `ang` on `frameCtx`, THE PerPixelEvaluator SHALL save the previous values of those fields before setting them and SHALL restore them after the per-pixel closure runs.
 2. THE `frameCtx` object SHALL have the same values for `x`, `y`, `rad`, and `ang` after `evaluate()` returns as it had before `evaluate()` was called.
-
----
-
-### Requirement 7 — Encapsulate VertexEvaluator Internals
-
-**User Story:** As a developer, I want `VertexEvaluator` to expose its warp type through a public method, so that external callers do not access private fields directly.
-
-#### Acceptance Criteria
-
-1. THE `VertexEvaluator` class SHALL expose a public method or getter (e.g. `getCompiledSpec()` or a `compiledSpec` getter) that returns the compiled warp specification object, or `null` if none is compiled.
-2. WHEN `glarea.js` needs to inspect the compiled warp type and parameters, THE MilkdropGLArea SHALL call the public method on `VertexEvaluator` rather than accessing `this._vertexEval._compiled` directly.
 
 ---
 

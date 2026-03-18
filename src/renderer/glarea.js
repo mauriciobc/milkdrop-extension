@@ -5,8 +5,6 @@ import Graphene from 'gi://Graphene';
 import Gtk from 'gi://Gtk?version=4.0';
 
 import {GlBridge} from './gl-bridge.js';
-import {createDefaultMesh, applyWarpToMesh} from './mesh.js';
-import {VertexEvaluator} from './vertex-eval.js';
 
 const FALLBACK_STRIPE_COUNT = 12;
 const FALLBACK_ORB_MIN_SIZE = 28;
@@ -32,10 +30,6 @@ class MilkdropGLArea extends Gtk.Widget {
         this._helperTexture = null;
         this._helperTextureSerial = 0;
         this._invalidHelperFrameSerial = 0;
-        this._baseMesh = createDefaultMesh();
-        this._vertexEval = new VertexEvaluator();
-        this._useShaderWarp = false;
-        this._warpParams = null;
         this._scratchRect = new Graphene.Rect();
         this._scratchColor = new Gdk.RGBA();
         this._glBridge = new GlBridge({
@@ -65,61 +59,13 @@ class MilkdropGLArea extends Gtk.Widget {
             return;
 
         this._frameState = frameState;
-        const payload = {...frameState};
-        if (this._useShaderWarp && this._warpParams) {
-            payload.warpInShader = true;
-            Object.assign(payload, this._warpParams);
-        }
-        this._glBridge.submitFrame(payload);
+        this._glBridge.submitFrame(frameState);
         if (!this._helperReady)
             this.queue_draw();
     }
 
-    loadPresetVertex(vertexSpec) {
-        this._vertexEval.compile(vertexSpec ?? null);
-        const c = this._vertexEval._compiled;
-        const builtInTypes = ['radial', 'angular', 'wave'];
-        if (c && builtInTypes.includes(c.warpType) && c.warpAmount !== 0) {
-            this._useShaderWarp = true;
-            this._warpParams = {
-                warpAmount: c.warpAmount,
-                warpSpeed: c.warpSpeed,
-                warpScale: c.warpScale,
-                warpType: builtInTypes.indexOf(c.warpType),
-            };
-        } else {
-            this._useShaderWarp = false;
-            this._warpParams = null;
-        }
-        if (this._useShaderWarp && this._helperReady) {
-            const mesh = createDefaultMesh(this._baseMesh.columns, this._baseMesh.rows);
-            applyWarpToMesh(mesh.vertices, mesh.vertexCount, {}, (u, v) => [u, v]);
-            this._glBridge.uploadMesh(mesh);
-        } else if (!this._useShaderWarp) {
-            this._uploadPresetMesh();
-        }
-    }
-
-    loadPresetShaders(shaders) {
-        if (!shaders)
-            return;
-
-        this._glBridge.compileShaders(shaders);
-    }
-
-    _uploadPresetMesh() {
-        if (!this._helperReady || !this._baseMesh)
-            return;
-
-        const mesh = createDefaultMesh(this._baseMesh.columns, this._baseMesh.rows);
-        const frame = this._frameState ?? {zoom: 1.0, rot: 0.0, dx: 0.0, dy: 0.0, t: 0};
-        applyWarpToMesh(
-            mesh.vertices,
-            mesh.vertexCount,
-            frame,
-            (u, v, f) => this._vertexEval.evaluate(u, v, f)
-        );
-        this._glBridge.uploadMesh(mesh);
+    changePreset(path) {
+        this._glBridge.changePreset(path);
     }
 
     _stopRendering() {
@@ -163,6 +109,14 @@ class MilkdropGLArea extends Gtk.Widget {
 
         this.remove_tick_callback(this._tickCallbackId);
         this._tickCallbackId = 0;
+    }
+
+    vfunc_size_allocate(width, height, baseline) {
+        super.vfunc_size_allocate(width, height, baseline);
+        if (!this._bridgeStarted)
+            return;
+        const [streamW, streamH] = this._buildHelperStreamSize();
+        this._glBridge.resize({width: streamW, height: streamH});
     }
 
     vfunc_snapshot(snapshot) {
@@ -234,10 +188,11 @@ class MilkdropGLArea extends Gtk.Widget {
     }
 
     _buildHelperStreamSize() {
+        const scale = this.get_scale_factor();
         const widgetWidth = Math.max(1, this.get_width(), this.get_allocated_width?.() ?? 0, 320);
         const widgetHeight = Math.max(1, this.get_height(), this.get_allocated_height?.() ?? 0, 180);
 
-        return [widgetWidth, widgetHeight];
+        return [widgetWidth * scale, widgetHeight * scale];
     }
 
     _getHelperTexture() {
@@ -314,19 +269,10 @@ class MilkdropGLArea extends Gtk.Widget {
         switch (message.type) {
         case 'helper-ready':
             this._helperReady = message.ok ?? false;
-            if (this._helperReady)
+            if (this._helperReady && this._helperFrame)
                 this._disableFallbackTick();
             else
                 this._ensureFallbackTick();
-            if (this._helperReady) {
-                if (this._useShaderWarp) {
-                    const mesh = createDefaultMesh(this._baseMesh.columns, this._baseMesh.rows);
-                    applyWarpToMesh(mesh.vertices, mesh.vertexCount, {}, (u, v) => [u, v]);
-                    this._glBridge.uploadMesh(mesh);
-                } else {
-                    this._uploadPresetMesh();
-                }
-            }
             if (!this._helperReady) {
                 this._helperFrame = null;
                 this._helperTexture = null;
@@ -341,6 +287,8 @@ class MilkdropGLArea extends Gtk.Widget {
             this._helperTexture = null;
             this._helperTextureSerial = 0;
             this._helperFrame = message;
+            if (this._helperReady)
+                this._disableFallbackTick();
             this.queue_draw();
             break;
         case 'shader_error':

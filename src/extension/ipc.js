@@ -136,8 +136,11 @@ export class IpcServer {
             this._pendingFrame = payload;
         } else {
             this._writeQueue.push(payload);
-            while (this._writeQueue.length > IpcServer.MAX_QUEUE_LENGTH)
+            while (this._writeQueue.length > IpcServer.MAX_QUEUE_LENGTH) {
+                if (_debugIpc())
+                    this._logger.info?.(`milkdrop [ipc-server] queue eviction monitor=${this._monitorIndex}`);
                 this._writeQueue.shift();
+            }
         }
         this._flushWriteQueue();
         return true;
@@ -203,7 +206,11 @@ export class IpcServer {
         if (!this._enabled || this._closing || !this._input)
             return;
 
-        this._input.read_line_async(GLib.PRIORITY_DEFAULT, this._cancellable, (stream, result) => {
+        // Capture input identity so stale callbacks after reconnect are ignored.
+        const capturedInput = this._input;
+        capturedInput.read_line_async(GLib.PRIORITY_DEFAULT, this._cancellable, (stream, result) => {
+            if (this._input !== capturedInput)
+                return;
             try {
                 if (!this._enabled || this._closing || !this._input)
                     return;
@@ -219,6 +226,8 @@ export class IpcServer {
 
                 this._readControlMessage();
             } catch (error) {
+                if (this._input !== capturedInput)
+                    return;
                 if (!error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
                     this._logger.debug?.(`milkdrop ipc read stopped for monitor ${this._monitorIndex}: ${error.message}`);
                 this._closeConnection();

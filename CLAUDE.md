@@ -36,9 +36,21 @@ just profile      # Launch under Sysprof
 
 ### Debug environment variables
 ```bash
-MILKDROP_DEBUG_IPC=1   # Log IPC messages
-MILKDROP_DEBUG_BEAT=1  # Log beat detection decisions
-MILKDROP_PERF_MARKS=1  # Enable Sysprof performance marks without attaching Sysprof
+MILKDROP_DEBUG_IPC=1    # Log IPC messages
+MILKDROP_DEBUG_BEAT=1   # Log beat detection decisions
+MILKDROP_DEBUG_MPRIS=1  # Log MPRIS/D-Bus detection (players, PlaybackStatus, hasActivePlayback)
+MILKDROP_DEBUG_HANG=1   # Warn when a frame pump or evaluator run exceeds 50ms (main-loop blocking)
+MILKDROP_PERF_MARKS=1   # Enable Sysprof performance marks without attaching Sysprof
+```
+
+### D-Bus window status (extension running)
+The extension exports a session-bus service to query current window/overlay status:
+- **Name:** `io.github.mauriciobc.Milkdrop`
+- **Path:** `/io/github/mauriciobc/Milkdrop`
+- **Method:** `GetWindowStatus()` → `a{sv}` (Paused, OverlayVisible, ShowOnlyWhenMediaPlaying, HasActivePlayback, RendererCount, WindowTitles)
+
+```bash
+busctl --user call io.github.mauriciobc.Milkdrop /io/github/mauriciobc/Milkdrop io.github.mauriciobc.Milkdrop GetWindowStatus
 ```
 
 ## Architecture
@@ -66,6 +78,7 @@ A standalone GTK4 application (GJS). Owns:
 Transport: Unix sockets with newline-delimited JSON.
 - Extension → Renderer: `frame-state` (time, frame count, audio metrics, motion vectors), `preset-change`
 - Renderer → Extension: `ready`, `fps`, `shader_error`, `shutdown_ack`
+- JS → C helper (stdin JSON): `init`, `resize`, `compile-default`, `compile-shaders`, `mesh`, `frame`, `shutdown`
 - The extension maintains an async write queue (max 5 frames) to avoid blocking the shell process.
 
 ### Expression Engine (`src/extension/expr/`)
@@ -90,15 +103,18 @@ PulseAudio Monitor Source → GStreamer Spectrum (24 bands) → AppSink (576 PCM
 1. Mesh generation — 256×192 warp grid
 2. Draw pass — ping-pong framebuffers, motion vectors, composite
 3. Warp pass — warp/zoom transformations
-4. Post-processing — border, echo, solarize, gamma
-5. PBO async readback → SHM double-buffer (via `gl-helper.c`)
+4. Overlay passes — custom shapes, custom waves, waveform (projectM-compatible shaders in `gl-helper.c`)
+5. Post-processing — border, echo, solarize, gamma
+6. Sync readback → SHM double-buffer (via `gl-helper.c`)
+
+The C helper uses two overlay shader programs: `overlay_untextured_program` (custom waves, waveform, untextured shapes) and `overlay_textured_program` (textured shapes). Attribute layout follows projectM: `aPosition` (loc 0, vec2), `aColor` (loc 1, vec4), `aUV` (loc 2, vec2). Color handling uses `color_modulo` (byte wrap-around) and `MaximizeColors` for waveform, with Catmull-Rom smoothing for custom waves.
 
 ## Tech Stack Notes
 - **Runtime:** GJS (GNOME JavaScript bindings) — not Node.js. No npm, no webpack, no transpilation.
 - **Build:** Meson + Ninja. The C helper (`gl-helper.c`) requires EGL, Epoxy, GLib, JSON-GLib at build time.
 - **Tests:** Custom minimal runner (`tests/run.js`). Each test module exports `run(assert)`. No Jest/Mocha.
 - **Target:** GNOME Shell 47, 48, 49. Wayland-first.
-- **GSettings schema:** `org.gnome.shell.extensions.milkdrop` (19 keys for monitors, audio, presets, rendering).
+- **GSettings schema:** `org.gnome.shell.extensions.milkdrop` (20 keys for monitors, audio, presets, rendering). Includes `show-only-when-media-playing` (MPRIS): visualizations run only when at least one MPRIS player has PlaybackStatus Playing.
 
 ## Parity vs projectM
 - **Parser:** `.milk` preset parser lives in `src/extension/milk-parser.js`; validated by `tests/bench/parser-benchmark.js` (PresetFileParser-style cases) and `tests/parity/expr/preset-parser.test.js`.
@@ -113,3 +129,6 @@ PulseAudio Monitor Source → GStreamer Spectrum (24 bands) → AppSink (576 PCM
 - The shell extension runs in the gnome-shell PID; crashes affect the entire desktop. Keep extension-side code robust.
 - IPC write queue has a hard cap of 5 pending frames — don't add blocking operations to the IPC path.
 - Renderer can be launched standalone (`just renderer`) for GL development without a full shell session.
+- **Resize**: The C helper accepts `resize` messages to recreate the EGL pbuffer, pixel buffer, SHM mappings, and FBOs without recompiling shaders. `glarea.js` sends resize via `vfunc_size_allocate`.
+- **HiDPI**: `glarea.js` multiplies widget dimensions by `get_scale_factor()` before sending to the C helper, so the helper always renders at physical pixel resolution.
+- **Crash guard**: `monitor.js` tracks renderer exit timestamps in a 30-second sliding window; after 5 crashes in that window, restart attempts stop until the extension is re-enabled.

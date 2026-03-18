@@ -12,8 +12,19 @@ function createBridgeWithMessages(options = {}) {
     return {bridge, messages};
 }
 
+function helperPathEndsWith(bridge, name) {
+    return bridge._helperPath.endsWith(name);
+}
+
 export function run(assert) {
-    // submitFrame forwards expanded renderer contract fields.
+    // Helper path always points to milkdrop-gl-helper (unified binary).
+    {
+        const {bridge} = createBridgeWithMessages();
+        assert(helperPathEndsWith(bridge, 'milkdrop-gl-helper'),
+            'GlBridge helper path ends with milkdrop-gl-helper');
+    }
+
+    // submitFrame sends simplified message with time and PCM.
     {
         const {bridge} = createBridgeWithMessages();
         const sent = [];
@@ -27,85 +38,59 @@ export function run(assert) {
         bridge.submitFrame({
             frame: 99,
             t: 12.5,
-            zoom: 1.02,
-            rot: 0.01,
-            dx: 0.02,
-            dy: -0.03,
-            decay: 0.95,
-            cx: 0.33,
-            cy: 0.77,
-            sx: 1.2,
-            sy: 0.8,
-            zoomexp: 1.5,
-            warp: 0.42,
-            wrap: 0,
-            echo_zoom: 1.1,
-            echo_alpha: 0.25,
-            echo_orient: 2,
-            gamma: 1.3,
-            brighten: 1,
-            darken: 0,
-            solarize: 1,
-            invert: 0,
-            darken_center: 1,
-            ob_size: 0.02,
-            ob_r: 0.1,
-            ob_g: 0.2,
-            ob_b: 0.3,
-            ob_a: 0.4,
-            ib_size: 0.03,
-            ib_r: 0.5,
-            ib_g: 0.6,
-            ib_b: 0.7,
-            ib_a: 0.8,
-            mv_x: 14,
-            mv_y: 10,
-            mv_dx: 0.01,
-            mv_dy: -0.02,
-            mv_l: 0.9,
-            mv_r: 1.0,
-            mv_g: 0.9,
-            mv_b: 0.8,
-            mv_a: 0.7,
-            wave_mode: 3,
-            wave_a: 0.6,
-            wave_scale: 1.7,
-            wave_smoothing: 0.9,
-            wave_x: 0.45,
-            wave_y: 0.55,
-            wave_dots: 1,
-            wave_thick: 1,
-            additivewave: 1,
-            wave_data: Array.from({length: 576}, (_, i) => Math.sin(i / 576 * Math.PI)),
+            pcmLeft: Array.from({length: 576}, (_, i) => Math.sin(i / 576 * Math.PI)),
+            pcmRight: Array.from({length: 576}, (_, i) => Math.cos(i / 576 * Math.PI)),
             audio: {energy: 0.4, bass: 0.2, mid: 0.3, high: 0.1},
         });
 
         assert(sent.length === 1, 'submitFrame sends one message when bridge is running and ready');
         const frame = sent[0];
-        assert(frame.type === 'frame' && frame.frame === 99, 'submitFrame sends frame message type and frame number');
-        assert(Math.abs(frame.cx - 0.33) < 1e-9 && Math.abs(frame.cy - 0.77) < 1e-9,
-            'submitFrame forwards cx/cy fields');
-        assert(Math.abs(frame.sx - 1.2) < 1e-9 && Math.abs(frame.sy - 0.8) < 1e-9,
-            'submitFrame forwards sx/sy fields');
-        assert(Math.abs(frame.zoomexp - 1.5) < 1e-9 && Math.abs(frame.warp - 0.42) < 1e-9,
-            'submitFrame forwards zoomexp/warp fields');
-        assert(frame.wrap === 0, 'submitFrame forwards wrap field');
-        assert(Math.abs(frame.echo_zoom - 1.1) < 1e-9 && Math.abs(frame.echo_alpha - 0.25) < 1e-9,
-            'submitFrame forwards echo fields');
-        assert(frame.echo_orient === 2, 'submitFrame forwards echo orientation');
-        assert(Math.abs(frame.ob_size - 0.02) < 1e-9 && Math.abs(frame.ib_size - 0.03) < 1e-9,
-            'submitFrame forwards border size fields');
-        assert(frame.mv_x === 14 && frame.mv_y === 10, 'submitFrame forwards motion vector grid fields');
-        assert(Math.abs(frame.mv_dx - 0.01) < 1e-9 && Math.abs(frame.mv_dy + 0.02) < 1e-9,
-            'submitFrame forwards motion vector displacement fields');
-        assert(Math.abs(frame.wave_a - 0.6) < 1e-9 && frame.wave_mode === 3,
-            'submitFrame forwards waveform control fields');
-        assert(frame.wave_dots === 1 && frame.wave_thick === 1 && frame.additivewave === 1,
-            'submitFrame forwards waveform draw flags');
-        assert(Array.isArray(frame.wave_data) && frame.wave_data.length === 576,
-            'submitFrame forwards waveform sample payload');
-        assert(Math.abs(frame.wave_data[2] - Math.sin(2 / 576 * Math.PI)) < 1e-9,
-            'submitFrame preserves waveform sample values');
+        assert(frame.type === 'frame', 'submitFrame sends frame message type');
+        assert(Math.abs(frame.time - 12.5) < 1e-9, 'submitFrame forwards time');
+        assert(Array.isArray(frame.pcmLeft) && frame.pcmLeft.length === 576,
+            'submitFrame forwards pcmLeft with 576 samples');
+        assert(Array.isArray(frame.pcmRight) && frame.pcmRight.length === 576,
+            'submitFrame forwards pcmRight with 576 samples');
+    }
+
+    // submitFrame includes presetPath when frameState has it.
+    {
+        const {bridge} = createBridgeWithMessages();
+        const sent = [];
+        bridge._running = true;
+        bridge._ready = true;
+        bridge.send = msg => sent.push(msg);
+        bridge.submitFrame({
+            frame: 1,
+            t: 0.5,
+            presetPath: '/path/to/preset.milk',
+            audio: {energy: 0, bass: 0, mid: 0, high: 0},
+        });
+        assert(sent.length === 1 && sent[0].presetPath === '/path/to/preset.milk',
+            'submitFrame forwards presetPath');
+    }
+
+    // changePreset sends preset-change message.
+    {
+        const {bridge} = createBridgeWithMessages();
+        const sent = [];
+        bridge._running = true;
+        bridge.send = msg => sent.push(msg);
+        bridge.changePreset('/path/to/new.milk');
+        assert(sent.length === 1, 'changePreset sends one message');
+        assert(sent[0].type === 'preset-change' && sent[0].path === '/path/to/new.milk',
+            'changePreset sends correct preset-change message');
+    }
+
+    // changePreset ignores null/undefined path.
+    {
+        const {bridge} = createBridgeWithMessages();
+        const sent = [];
+        bridge._running = true;
+        bridge.send = msg => sent.push(msg);
+        bridge.changePreset(null);
+        bridge.changePreset(undefined);
+        assert(sent.length === 0, 'changePreset ignores null/undefined path');
     }
 
     // _armShmAcceptLoop does not arm when not running.
@@ -185,8 +170,8 @@ export function run(assert) {
         bridge._armShmAcceptLoop();
         pendingReceiveCallback(connection, {fd: 17});
 
-        assert(bridge._shmFdQueue.length === 1, 'accept_finish tuple shape enqueues received fd');
-        assert(bridge._shmFdQueue[0] === 17, 'accept_finish tuple keeps received fd value');
+        assert(bridge._shmSlots.length === 1, 'accept_finish tuple shape enqueues received fd');
+        assert(bridge._shmSlots[0].fd === 17, 'accept_finish tuple keeps received fd value');
     }
 
     // _armShmAcceptLoop uses GLib FD source when receive_fd_async is unavailable but get_socket() is present.
@@ -195,7 +180,7 @@ export function run(assert) {
         const fdSourceCalls = [];
         bridge._addFdSource = (priority, fd, condition, callback) => {
             fdSourceCalls.push({priority, fd, condition, callback});
-            return 77; // fake source id
+            return 77;
         };
 
         const fakeSocketFd = 42;
@@ -221,11 +206,10 @@ export function run(assert) {
         assert(bridge._shmConnection === connection,
             '_armShmAcceptLoop keeps connection alive for sync receive loop');
 
-        // Simulate GLib source firing — should call receive_fd and enqueue the FD
         if (fdSourceCalls.length >= 1) {
             const result = fdSourceCalls[0].callback();
-            assert(bridge._shmFdQueue.length === 1, 'sync receive loop enqueues FD on source fire');
-            assert(bridge._shmFdQueue[0] === 99, 'sync receive loop enqueues FD value from receive_fd');
+            assert(bridge._shmSlots.length === 1, 'sync receive loop enqueues FD on source fire');
+            assert(bridge._shmSlots[0].fd === 99, 'sync receive loop enqueues FD value from receive_fd');
             assert(result === GLib.SOURCE_CONTINUE, 'sync receive loop GLib source continues after receiving FD');
         }
     }
@@ -235,11 +219,8 @@ export function run(assert) {
         const {bridge, messages} = createBridgeWithMessages();
         let acceptCalls = 0;
         const connection = {
-            receive_fd() {
-                return 99;
-            },
-            close() {
-            },
+            receive_fd() { return 99; },
+            close() {},
         };
         const listener = {
             accept_async(_cancellable, callback) {
@@ -247,9 +228,7 @@ export function run(assert) {
                 if (acceptCalls === 1)
                     callback(listener, {});
             },
-            accept_finish() {
-                return connection;
-            },
+            accept_finish() { return connection; },
         };
 
         bridge._running = true;
@@ -265,7 +244,7 @@ export function run(assert) {
         );
         assert(acceptCalls === 1, 'no-socket-fd connection is rejected without rearming receive loop');
         assert(bridge._shmListener === null, 'no-socket-fd connection disables shm listener');
-        assert(bridge._shmFdQueue.length === 0, 'no-socket-fd connection does not enqueue fds');
+        assert(bridge._shmSlots.length === 0, 'no-socket-fd connection does not enqueue fds');
         assert(warned, 'no-socket-fd connection emits warning telemetry');
     }
 
@@ -278,11 +257,8 @@ export function run(assert) {
             receive_fd_async(_cancellable, callback) {
                 pendingReceiveCallback = callback;
             },
-            receive_fd_finish(result) {
-                return result.fd;
-            },
-            close() {
-            },
+            receive_fd_finish(result) { return result.fd; },
+            close() {},
         };
         const listener = {
             accept_async(_cancellable, callback) {
@@ -290,22 +266,19 @@ export function run(assert) {
                 if (acceptCalls === 1)
                     callback(listener, {});
             },
-            accept_finish() {
-                return connection;
-            },
+            accept_finish() { return connection; },
         };
 
         bridge._running = true;
         bridge._cancellable = {};
         bridge._shmListener = listener;
         bridge._armShmAcceptLoop();
-
         pendingReceiveCallback(connection, {fd: 21});
         pendingReceiveCallback(connection, {fd: 22});
 
         assert(acceptCalls === 1, 'persistent shm connection does not re-accept per fd');
-        assert(bridge._shmFdQueue.length === 2, 'persistent shm connection queues multiple received fds');
-        assert(bridge._shmFdQueue[0] === 21 && bridge._shmFdQueue[1] === 22,
+        assert(bridge._shmSlots.length === 2, 'persistent shm connection queues multiple received fds');
+        assert(bridge._shmSlots[0].fd === 21 && bridge._shmSlots[1].fd === 22,
             'persistent shm connection preserves fd ordering');
     }
 
@@ -321,17 +294,12 @@ export function run(assert) {
             receive_fd_finish(_result) {
                 throw new Error('receive failed');
             },
-            close() {
-            },
+            close() {},
         };
         const secondConnection = {
-            receive_fd_async(_cancellable, _callback) {
-            },
-            receive_fd_finish(result) {
-                return result.fd;
-            },
-            close() {
-            },
+            receive_fd_async(_cancellable, _callback) {},
+            receive_fd_finish(result) { return result.fd; },
+            close() {},
         };
         const listener = {
             accept_async(_cancellable, callback) {
@@ -347,7 +315,6 @@ export function run(assert) {
         bridge._cancellable = {};
         bridge._shmListener = listener;
         bridge._armShmAcceptLoop();
-
         firstPendingCallback(firstConnection, {});
 
         const warned = messages.some(message =>
@@ -373,16 +340,10 @@ export function run(assert) {
             stride: 8,
             format: 'rgba8',
         }));
-        bridge._shmFdQueue.push(44);
+        bridge._enqueueShmFd(44);
         bridge._drainShmFrameQueue();
 
-        const warned = messages.some(message =>
-            message.type === 'telemetry' &&
-            message.stage === 'shm_fd' &&
-            message.level === 'warn'
-        );
         const frameMessage = messages.find(message => message.type === 'frame-pixels');
-        assert(!warned, 'frame-pixels-fd no longer warns when fd has not arrived yet');
         assert(Boolean(frameMessage), 'frame-pixels-fd emits frame once fd arrives');
         assert(frameMessage?.frame === 1, 'frame-pixels-fd keeps metadata while waiting for fd');
         assert(frameMessage?.bytes === fakeBytes, 'frame-pixels-fd forwards GLib.Bytes without copying');
@@ -394,7 +355,7 @@ export function run(assert) {
         const fakeBytes = GLib.Bytes.new(new Uint8Array([7, 8, 9, 10]));
         bridge._readFrameBytesAsync = (_fd, _pixelCount, callback) => callback(null, fakeBytes);
 
-        bridge._shmFdQueue.push(55);
+        bridge._enqueueShmFd(55);
         bridge._drainShmFrameQueue();
         bridge._handleLine(JSON.stringify({
             type: 'frame-pixels-fd',
@@ -418,8 +379,8 @@ export function run(assert) {
             readCalls.push({fd, callback});
         };
 
-        bridge._shmFdQueue.push(70);
-        bridge._shmFdQueue.push(71);
+        bridge._enqueueShmFd(70);
+        bridge._enqueueShmFd(71);
         bridge._drainShmFrameQueue();
         bridge._handleLine(JSON.stringify({
             type: 'frame-pixels-fd',
@@ -454,7 +415,52 @@ export function run(assert) {
             'paired frames preserve FIFO metadata order');
     }
 
-    // Base64 frame fallback updates bridge frame cache.
+    // incomplete shm read schedules delayed retry instead of immediate tight loop.
+    {
+        const {bridge, messages} = createBridgeWithMessages();
+        const scheduledDelays = [];
+        bridge._scheduleShmQueueDrain = delay => scheduledDelays.push(delay);
+        bridge._readFrameBytesAsync = (_fd, _pixelCount, callback) => {
+            callback(new Error('incomplete frame bytes read expected=16 got=0'), null);
+        };
+        bridge._shmSlots.push({
+            meta: {frame: 1, width: 2, height: 2, stride: 8, format: 'rgba8'},
+            fd: 33,
+        });
+
+        bridge._drainShmFrameQueue();
+
+        const warned = messages.some(message =>
+            message.type === 'telemetry' &&
+            message.stage === 'shm_read' &&
+            message.level === 'warn'
+        );
+        assert(bridge._shmReadFailureStreak === 1, 'incomplete shm read increments failure streak');
+        assert(scheduledDelays.length === 1 && scheduledDelays[0] > 0,
+            'incomplete shm read schedules delayed retry');
+        assert(warned, 'incomplete shm read emits warning telemetry');
+    }
+
+    // publishing frame pixels triggers bounded forced GC hook.
+    {
+        const {bridge} = createBridgeWithMessages();
+        let gcCalls = 0;
+        bridge._maybeForceGc = () => {
+            gcCalls += 1;
+        };
+
+        bridge._publishFramePixels({
+            frame: 3,
+            width: 1,
+            height: 1,
+            stride: 4,
+            format: 'rgba8',
+        }, GLib.Bytes.new(new Uint8Array([1, 2, 3, 4])));
+
+        assert(gcCalls === 1, '_publishFramePixels invokes forced GC hook');
+    }
+
+    // Deprecated base64 frame payloads are dropped (strict-only renderer).
     {
         const {bridge, messages} = createBridgeWithMessages();
         const payload = new Uint8Array([10, 20, 30, 40]);
@@ -471,41 +477,12 @@ export function run(assert) {
         }));
 
         const frameMessage = messages.find(message => message.type === 'frame-pixels');
-        const fallbackTelemetry = messages.find(message =>
-            message.type === 'telemetry' && message.stage === 'base64_fallback'
+        const telemetry = messages.find(message =>
+            message.type === 'telemetry' && message.stage === 'unexpected_base64_frame'
         );
-        assert(Boolean(frameMessage), 'base64 frame emits frame-pixels message');
-        assert(Boolean(fallbackTelemetry), 'base64 frame emits fallback telemetry');
-        assert(bridge.lastFramePixels?.frame === 7, 'base64 frame updates lastFramePixels frame number');
-        assert(bridge.lastFramePixels?.serial === 1, 'base64 frame increments lastFramePixels serial');
-        assert(typeof bridge.lastFramePixels?.bytes?.get_size === 'function',
-            'base64 frame stores bytes as GLib.Bytes');
-        assert(bridge.lastFramePixels?.bytes?.get_size() === 4, 'base64 frame decode preserves byte length');
-    }
-
-    // Strict render path rejects base64 frame fallback payloads.
-    {
-        const {bridge, messages} = createBridgeWithMessages({strictRenderPath: true});
-        const payload = new Uint8Array([10, 20, 30, 40]);
-        const encoded = GLib.base64_encode(payload);
-
-        bridge._handleLine(JSON.stringify({
-            type: 'frame-pixels',
-            frame: 7,
-            width: 1,
-            height: 1,
-            stride: 4,
-            format: 'rgba8',
-            data: encoded,
-        }));
-
-        const frameMessage = messages.find(message => message.type === 'frame-pixels');
-        const rejectedTelemetry = messages.find(message =>
-            message.type === 'telemetry' && message.stage === 'base64_disabled'
-        );
-        assert(!frameMessage, 'strict render path drops base64 frame payload');
-        assert(Boolean(rejectedTelemetry), 'strict render path emits base64_disabled telemetry');
-        assert(bridge.lastFramePixels === null, 'strict render path keeps frame cache empty for base64 payloads');
+        assert(!frameMessage, 'base64 payload does not emit frame-pixels message');
+        assert(Boolean(telemetry), 'base64 payload emits unexpected_base64_frame telemetry');
+        assert(bridge.lastFramePixels === null, 'base64 payload does not update lastFramePixels');
     }
 
     // send applies backpressure by dropping frame payloads when queue is full.

@@ -490,11 +490,15 @@ export class AudioEngine {
         this._busPollId = clearGSource(this._busPollId);
         this._busWatchId = clearGSource(this._busWatchId);
         if (this._bus && this._busSignalHandlerId) {
-            try { this._bus.disconnect(this._busSignalHandlerId); } catch (_) {}
+            try { this._bus.disconnect(this._busSignalHandlerId); } catch (e) {
+                this._logger.debug?.(`milkdrop audio bus disconnect error: ${e.message}`);
+            }
         }
         this._busSignalHandlerId = 0;
         if (this._bus && this._busSignalWatchEnabled) {
-            try { this._bus.remove_signal_watch?.(); } catch (_) {}
+            try { this._bus.remove_signal_watch?.(); } catch (e) {
+                this._logger.debug?.(`milkdrop audio bus remove_signal_watch error: ${e.message}`);
+            }
         }
         this._busSignalWatchEnabled = false;
     }
@@ -790,8 +794,10 @@ export class AudioEngine {
                 const src = ((i * count) / PCM_SAMPLES) | 0;
                 if (src < count) {
                     const idx = src * ch;
-                    left[i] = data[idx] * scale;
-                    right[i] = (ch >= 2 ? data[idx + 1] : data[idx]) * scale;
+                    const lv = data[idx] * scale;
+                    const rv = (ch >= 2 ? data[idx + 1] : data[idx]) * scale;
+                    left[i] = Number.isFinite(lv) ? lv : 0;
+                    right[i] = Number.isFinite(rv) ? rv : 0;
                 }
             }
         } finally {

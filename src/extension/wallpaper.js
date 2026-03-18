@@ -22,8 +22,8 @@ export const LiveWallpaper = GObject.registerClass(
         constructor(backgroundActor) {
             super({
                 layout_manager: new Clutter.BinLayout(),
-                width: backgroundActor.width,
-                height: backgroundActor.height,
+                width: Math.max(1, backgroundActor.width || 1),
+                height: Math.max(1, backgroundActor.height || 1),
                 x_expand: true,
                 y_expand: true,
                 opacity: 0,

@@ -150,7 +150,7 @@ Also add `return` after the `helper-ready` emit in the `program_ready` block of
   ```
   u_str ESTAB 0 213248 /run/user/1000/gnome-milkdrop-0.sock
   ```
-- No SHM socket present → `base64_fallback` transport is active
+- No SHM socket present → nenhum frame pode ser entregue (SHM/FD é obrigatório)
 
 ### Log sequence for the freezing session
 ```
@@ -158,7 +158,7 @@ IPC client connected
 renderer IPC ready
 helper ready ok=true (1st)   ← compile-default
 helper ready ok=true (2nd)   ← compile-shaders for initial preset
-base64_fallback telemetry
+(esperado) telemetry `readback` warn indicando falha de entrega via SHM/FD
 frame=1  time=2866.038
 frame=300 time=2871.154
 helper ready ok=true (3rd)   ← compile-shaders for second preset (~5s after start)
@@ -173,29 +173,14 @@ fires ~5 s into a session in this environment.
 
 ### Why frames stop after 600
 
-**Root cause: base64 memory pressure causes a GC stall that fills the IPC socket buffer.**
+**Nota:** o caminho legado de transporte **base64** foi removido; o renderer strict-only entrega pixels apenas via **SHM/FD**.
 
-At 320×180 × 60 fps via base64 transport:
-- `GLib.base64_decode()` returns a **230 KB Uint8Array** per frame
-- `GLib.Bytes.new(decoded)` wraps it in a C heap object opaque to SpiderMonkey GC
-- SpiderMonkey sees only a tiny JS wrapper, not the 230 KB behind it
-- GC is not triggered by C-heap pressure → **allocations accumulate → 487 MB RSS**
-- When SpiderMonkey eventually GCs (triggered by JS heap limit), the main thread
-  **pauses for a significant time**
-- During the pause, `read_line_async` callbacks do not fire; the extension keeps writing
-  frame messages to the IPC socket
-- After ~42 × 5 KB frames the socket send-buffer hits its ~213 KB cap
-- The extension's next `write_bytes_async` call **blocks asynchronously**
+Se frames pararem após N frames, as hipóteses principais agora são:
+- Falha de entrega/recebimento de FD no socket SHM (ex.: `receive_fd_async`/fallback sync não drenando)
+- Falha de leitura dos bytes do frame (SHM) no `GlBridge` (timeout/retries)
+- Helper travado/sem `frame-stat` (watchdog deve reiniciar e emitir telemetria)
 
-After GC ends, the pending `read_line_async` should theoretically resume — but in
-practice, the watchdog may have already fired and restarted the C helper, and the
-resulting telemetry messages go through `_ipcClient.send()` which silently drops when
-the IPC output buffer is full or `_output === null`.
-
-The final result is a fully stalled pipeline:
-- Renderer not reading from extension → C helper gets no frame commands → idle
-- Watchdog fires → telemetry dropped → extension sees nothing
-- Both processes alive but silent
+O sintoma esperado quando SHM/FD falha é telemetria `readback` warn (helper) e ausência de `frame-pixels` no renderer.
 
 ### Secondary issue: wallpaper.js disposed-object error loop
 

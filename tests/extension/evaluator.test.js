@@ -53,7 +53,7 @@ export function run(assert) {
         assert(out.decay === 0.95, 'evaluateFrame decay from preset');
         assert(out.presetId === 'p1', 'evaluateFrame presetId');
         assert(out.presetName === 'Preset1', 'evaluateFrame presetName');
-        assert(out.uniforms.time === 10, 'evaluateFrame uniforms.time');
+        assert(out.t === 10, 'evaluateFrame t is forwarded from frameState');
         assert(out.audio.energy === 0.5, 'evaluateFrame audio.energy');
         assert(out.audio.bass === 0.2, 'evaluateFrame audio.bass');
         assert(out.blendProgress === 1, 'evaluateFrame no blend so blendProgress 1');
@@ -113,7 +113,7 @@ export function run(assert) {
         assert(Math.abs(out.zoom - 1.3) < 1e-9, 'expression path accepts treb as a high-band alias');
         assert(Math.abs(out.decay - 0.21) < 1e-9, 'expression path derives treb_att from normalized high alias');
         assert(out.audio.high === 0.3, 'evaluateFrame normalizes incoming treb to high in output audio');
-        assert(out.uniforms.high === 0.3, 'evaluateFrame uniforms expose normalized high value from treb alias');
+        assert(out.audio.high === 0.3, 'evaluateFrame output audio exposes normalized high value from treb alias');
     }
 
     // expression path exposes renderer-facing MilkDrop controls needed by downstream passes.
@@ -252,7 +252,7 @@ export function run(assert) {
         assert(e._blendFrom === null, '_getBlendProgress clears blend when elapsed >= duration');
     }
 
-    // Expression-to-expression blending: verifies that _exprCtx is also blended
+    // Expression-to-expression blending: verifies that zoom is blended correctly
     {
         const e = new Evaluator();
         const p1 = {
@@ -275,8 +275,7 @@ export function run(assert) {
 
         // At t=10.5, blendProgress = 0.5. smoothstep(0.5) = 0.5.
         // zoom = 1.0 + (2.0 - 1.0) * 0.5 = 1.5
-        assert(Math.abs(out.zoom - 1.5) < 1e-6, 'expr-to-expr: top-level zoom is blended');
-        assert(Math.abs(out._exprCtx.zoom - 1.5) < 1e-6, 'expr-to-expr: _exprCtx.zoom is blended');
+        assert(Math.abs(out.zoom - 1.5) < 1e-6, 'expr-to-expr: zoom is blended at mid-transition');
     }
 
     // Legacy-to-expression blending: verifies that prev values are captured from legacy and used in expr
@@ -301,8 +300,7 @@ export function run(assert) {
 
         // At t=20.5, blendProgress = 0.5. smoothstep(0.5) = 0.5.
         // zoom = 3.0 + (1.0 - 3.0) * 0.5 = 2.0
-        assert(Math.abs(out.zoom - 2.0) < 1e-6, 'legacy-to-expr: top-level zoom is blended');
-        assert(Math.abs(out._exprCtx.zoom - 2.0) < 1e-6, 'legacy-to-expr: _exprCtx.zoom is blended');
+        assert(Math.abs(out.zoom - 2.0) < 1e-6, 'legacy-to-expr: zoom is blended at mid-transition');
     }
 
     // destroy() clears state

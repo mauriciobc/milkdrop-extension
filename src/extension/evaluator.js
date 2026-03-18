@@ -187,13 +187,10 @@ export class Evaluator {
 
             const renderControls = buildRenderControls(ctx);
             
-            // Evaluate custom shapes
-            const customShapes = this._exprEval.evaluateCustomShapes();
-            
-            // Evaluate custom waves (needs PCM audio data)
-            // Note: spectrumLeft/spectrumRight are not currently provided by the audio engine,
-            // so we use PCM data as a fallback for spectrum-based custom waves
-            const customWaves = this._exprEval.evaluateCustomWaves({
+            // Evaluate custom shapes and waves to keep per-frame expression state current.
+            // Results are not forwarded via IPC (renderer does not consume them).
+            this._exprEval.evaluateCustomShapes();
+            this._exprEval.evaluateCustomWaves({
                 pcmLeft: incomingAudio.pcmLeft || [],
                 pcmRight: incomingAudio.pcmRight || [],
                 spectrumLeft: incomingAudio.pcmLeft || [],
@@ -212,22 +209,6 @@ export class Evaluator {
                 dy,
                 decay,
                 ...renderControls,
-                customShapes,
-                customWaves,
-                _exprCtx: Object.fromEntries(Object.entries(ctx).filter(([k, v]) => !ArrayBuffer.isView(v))),
-                uniforms: {
-                    time,
-                    zoom,
-                    rot,
-                    dx,
-                    dy,
-                    decay,
-                    energy: audio.energy,
-                    bass: audio.bass,
-                    mid: audio.mid,
-                    high: audio.high,
-                    beat: audio.beat,
-                },
             };
         }
 
@@ -270,19 +251,6 @@ export class Evaluator {
             dy,
             decay,
             ...renderControls,
-            uniforms: {
-                time,
-                zoom,
-                rot,
-                dx,
-                dy,
-                decay,
-                energy: audio.energy,
-                bass: audio.bass,
-                mid: audio.mid,
-                high: audio.high,
-                beat: audio.beat,
-            },
         };
     }
 

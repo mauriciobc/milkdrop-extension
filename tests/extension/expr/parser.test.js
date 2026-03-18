@@ -167,6 +167,18 @@ export function run(assert) {
         assert(stmts.length === 0, 'whitespace: 0 statements');
     }
 
+    // --- Source starting with line comment parses (no "Unexpected prefix op \'/\'" at pos 0) ---
+    {
+        const stmts = body('// comment\nwarp = 1;');
+        assert(stmts.length === 1, 'line comment first: 1 statement');
+        assert(stmts[0].type === NodeType.ASSIGN && stmts[0].name === 'warp', 'line comment first: warp = 1');
+    }
+    {
+        const stmts = body('/* block */\nzoom = 1;');
+        assert(stmts.length === 1, 'block comment first: 1 statement');
+        assert(stmts[0].type === NodeType.ASSIGN && stmts[0].name === 'zoom', 'block comment first: zoom = 1');
+    }
+
     // --- Complex expression from a preset ---
     {
         const stmts = body('wave_r = wave_r + 0.400 * (0.60 * sin(0.900 * time) + 0.40 * sin(0.963 * time));');

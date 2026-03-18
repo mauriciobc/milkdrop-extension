@@ -28,7 +28,7 @@ This document tracks the process and progress of validating visual and engine pa
   - Audio response (beat detection, PCM/spectrum mapping)
 - Located and reviewed:
   - Preset loading and frame capture logic in both codebases
-  - Existing test harness: `tests/visual-compliance.js`
+  - Existing visual parity checks: `tests/parity/visual/visual.test.js`
 
 ## 5. Automation: Preset Loading & Frame Capture
 - Confirmed automation is possible via test harness and renderer APIs.
@@ -52,7 +52,7 @@ This document tracks the process and progress of validating visual and engine pa
 ---
 
 ## Files and References
-- MilkDrop GNOME: `src/extension/evaluator.js`, `src/extension/audio.js`, `src/renderer/glarea.js`, `tests/visual-compliance.js`
+- MilkDrop GNOME: `src/extension/evaluator.js`, `src/extension/audio.js`, `src/renderer/glarea.js`, `tests/parity/visual/visual.test.js`
 - projectM: `ProjectM.cpp`, `PerFrameContext.cpp`, `audio.h`, `audioCapture.cpp`
 - Presets: `presets/se7enslasher-2025/`
 

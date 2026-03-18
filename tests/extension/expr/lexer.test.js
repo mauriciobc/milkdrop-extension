@@ -199,4 +199,31 @@ export function run(assert) {
         const hasError = tokens.some(t => t.type === TokenType.ERROR);
         assert(hasError, 'unknown char @ produces ERROR token');
     }
+
+    // --- Line comments: // ... (no token emitted) ---
+    {
+        const tokens = tokenize('// comment\nwarp = 1');
+        assert(tokens[0].type === TokenType.IDENT && tokens[0].value === 'warp', 'line comment: first token is warp');
+        assert(tokens[1].type === TokenType.ASSIGN, 'line comment: then =');
+        assert(tokens[2].type === TokenType.NUMBER && tokens[2].value === 1, 'line comment: then 1');
+        assert(tokens[3].type === TokenType.EOF, 'line comment: ends with EOF');
+    }
+    {
+        const tokens = tokenize('// only comment\n');
+        assert(tokens.length === 1 && tokens[0].type === TokenType.EOF, 'line comment only: just EOF');
+    }
+
+    // --- Block comments: /* ... */ (no token emitted) ---
+    {
+        const tokens = tokenize('/* block */ zoom = 1');
+        assert(tokens[0].type === TokenType.IDENT && tokens[0].value === 'zoom', 'block comment: first token is zoom');
+        assert(tokens[1].type === TokenType.ASSIGN, 'block comment: then =');
+        assert(tokens[2].type === TokenType.NUMBER && tokens[2].value === 1, 'block comment: then 1');
+    }
+    {
+        const tokens = tokenize('x /* mid */ / 2');
+        assert(tokens[0].type === TokenType.IDENT && tokens[0].value === 'x', 'block mid: x');
+        assert(tokens[1].type === TokenType.OP && tokens[1].value === '/', 'block mid: /');
+        assert(tokens[2].type === TokenType.NUMBER && tokens[2].value === 2, 'block mid: 2');
+    }
 }

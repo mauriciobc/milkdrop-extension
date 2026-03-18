@@ -33,6 +33,7 @@ export class IpcClient {
     }
 
     static HEARTBEAT_TIMEOUT_MS = 15000;
+    static MAX_QUEUE_LENGTH = 10;
 
     start() {
         if (!this._socketPath || this._running)
@@ -150,6 +151,11 @@ export class IpcClient {
             return;
 
         this._writeQueue.push(`${JSON.stringify(message)}\n`);
+        while (this._writeQueue.length > IpcClient.MAX_QUEUE_LENGTH) {
+            if (_debugIpc())
+                this._logger.info?.('milkdrop [renderer] IPC queue eviction');
+            this._writeQueue.shift();
+        }
         this._flushWriteQueue();
     }
 

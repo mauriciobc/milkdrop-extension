@@ -2,6 +2,14 @@
  * MilkDrop 2 expression language parser.
  * Pratt parser (precedence climbing) producing an AST.
  * Pure JS — no GI imports.
+ *
+ * Known limitations (presets using these are filtered out by validatePresetExpressions):
+ * - Semicolon inside parentheses is not supported: e.g. func(a; b) or (a; b) will
+ *   produce "Expected RPAREN, got SEMI". Semicolons are only valid as top-level
+ *   statement separators (program()).
+ * - Assignment (=) is only allowed when the left-hand side is an identifier or
+ *   megabuf(i)/gmegabuf(i). Otherwise (e.g. = at start of expression, or complex
+ *   LHS) produces "Unexpected token type ASSIGN".
  */
 
 import { tokenize, TokenType } from './lexer.js';

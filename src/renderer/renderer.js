@@ -127,16 +127,6 @@ function parseArgs(argv) {
     return options;
 }
 
-function resolvePresetVertexSource(preset) {
-    if (!preset || typeof preset !== 'object')
-        return null;
-
-    if (typeof preset.pixel_eqs === 'string' && preset.pixel_eqs.trim() !== '')
-        return preset.pixel_eqs;
-
-    return preset.vertex ?? null;
-}
-
 const MilkdropRendererApplication = GObject.registerClass(
 class MilkdropRendererApplication extends Gtk.Application {
     constructor(options) {
@@ -247,10 +237,10 @@ class MilkdropRendererApplication extends Gtk.Application {
                 onPresetLoad: message => {
                     const nextPreset = message.preset ?? null;
                     const presetName = nextPreset?.name ?? 'preset cleared';
-                    const vertexSource = resolvePresetVertexSource(nextPreset);
+                    const presetPath = nextPreset?.path ?? null;
                     try {
-                        glArea.loadPresetVertex(vertexSource);
-                        glArea.loadPresetShaders(nextPreset?.shaders ?? null);
+                        if (presetPath)
+                            glArea.changePreset(presetPath);
                         this._currentPreset = nextPreset;
                         this._bridgeStatusText = nextPreset
                             ? `preset loaded: ${presetName}`
@@ -444,7 +434,7 @@ class MilkdropRendererApplication extends Gtk.Application {
     }
 });
 
-export {parseArgs, resolvePresetVertexSource, MilkdropRendererApplication};
+export {parseArgs, MilkdropRendererApplication};
 
 /**
  * Benchmark mode: render N frames with synthetic data, print timing summary, exit.

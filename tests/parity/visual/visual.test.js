@@ -139,7 +139,8 @@ export function run(assert) {
         const rendererFiles = [
             'src/renderer/renderer.js',
             'src/renderer/glarea.js',
-            'src/renderer/shaders.js',
+            'src/renderer/gl-bridge.js',
+            'src/renderer/ipc-client.js',
         ];
         let allExist = true;
         for (const f of rendererFiles) {
@@ -172,10 +173,10 @@ export function run(assert) {
                  actual: `diff: ${result.diffPercent.toFixed(2)}%` };
     }));
     
-    // Test 7: Check visual compliance test exists
-    results.push(runTest('Visual compliance test exists', () => {
-        const file = GLib.file_test('tests/visual-compliance.js', GLib.FileTest.EXISTS);
-        return { pass: file, expected: 'visual-compliance.js exists', 
+    // Test 7: Check native helper source exists
+    results.push(runTest('Native helper source exists', () => {
+        const file = GLib.file_test('src/renderer/gl-helper.c', GLib.FileTest.EXISTS);
+        return { pass: file, expected: 'gl-helper.c exists',
                  actual: file ? 'found' : 'not found' };
     }));
     

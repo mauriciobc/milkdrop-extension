@@ -12,14 +12,11 @@ function readText(relativePath) {
 export function run(assert) {
     const rendererText = readText('src/renderer/renderer.js');
 
-    // Preset-load handling must prefer pixel_eqs for vertex warp source,
-    // while still falling back to legacy vertex spec.
+    // Preset-load handling sends preset path to GL helper via changePreset.
     {
-        const hasPixelEqsSource = rendererText.includes('function resolvePresetVertexSource(preset)')
-            && rendererText.includes('preset.pixel_eqs')
-            && rendererText.includes('return preset.vertex ?? null')
-            && rendererText.includes('const vertexSource = resolvePresetVertexSource(nextPreset)');
-        assert(hasPixelEqsSource,
-            'renderer preset-load path resolves vertexSource using pixel_eqs preference with vertex fallback');
+        const hasPresetPathLoad = rendererText.includes('glArea.changePreset(presetPath)')
+            && rendererText.includes('const presetPath = nextPreset?.path ?? null');
+        assert(hasPresetPathLoad,
+            'renderer preset-load path sends preset file path to GL helper via changePreset');
     }
 }

@@ -20,7 +20,7 @@
     <key name="beat-cuts-enabled" type="b">
       <default>false</default>
       <summary>Beat cuts enabled</summary>
-      <description>Allow beat events to force preset changes once implemented.</description>
+      <description>Allow beat events to force preset changes.</description>
     </key>
     <key name="audio-sensitivity" type="d">
       <default>1.0</default>
@@ -30,7 +30,7 @@
     <key name="show-on-empty-desktop-only" type="b">
       <default>false</default>
       <summary>Empty desktop only</summary>
-      <description>Restrict the renderer to empty-desktop situations once the visibility policy is implemented.</description>
+      <description>Pause the renderer unless the desktop is empty (no normal windows visible).</description>
     </key>
     <key name="text-overlay-enabled" type="b">
       <default>true</default>
@@ -47,10 +47,20 @@
       <summary>Hide when maximized</summary>
       <description>Hide or pause the renderer when windows are maximized.</description>
     </key>
+    <key name="show-only-when-media-playing" type="b">
+      <default>false</default>
+      <summary>Show only when media playing</summary>
+      <description>Run visualizations only when at least one MPRIS player has PlaybackStatus Playing. When no media is playing, the extension stays enabled but paused to save CPU and GPU.</description>
+    </key>
     <key name="preset-directory" type="s">
       <default>''</default>
       <summary>Preset directory</summary>
       <description>Optional directory containing user-managed preset files.</description>
+    </key>
+    <key name="preset-path" type="s">
+      <default>''</default>
+      <summary>Preset path</summary>
+      <description>Optional preset file path (usually a .milk). When set, the renderer will load this preset and automatic rotation is paused.</description>
     </key>
     <key name="fps-limit" type="i">
       <default>60</default>

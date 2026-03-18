@@ -39,6 +39,21 @@ export function tokenize(src) {
         // Skip whitespace
         if (isWhitespace(ch)) { i++; continue; }
 
+        // Line comment: // ... to end of line
+        if (ch === '/' && i + 1 < len && src[i + 1] === '/') {
+            i += 2;
+            while (i < len && src[i] !== '\n') i++;
+            continue;
+        }
+
+        // Block comment: /* ... */
+        if (ch === '/' && i + 1 < len && src[i + 1] === '*') {
+            i += 2;
+            while (i + 1 < len && (src[i] !== '*' || src[i + 1] !== '/')) i++;
+            if (i + 1 < len) i += 2;
+            continue;
+        }
+
         // Numbers: digits or leading dot followed by digit
         if (isDigit(ch) || (ch === '.' && i + 1 < len && isDigit(src[i + 1]))) {
             const start = i;
