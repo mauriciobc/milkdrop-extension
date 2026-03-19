@@ -64,8 +64,8 @@ export function run(assert) {
         const e = new Evaluator();
         e.loadPreset(null);
         const out = e.evaluateFrame({ t: 0 });
-        assert(out.presetId === 'builtin:demo-wave', 'null preset presetId default');
-        assert(out.presetName === 'Demo Wave', 'null preset presetName default');
+        assert(out.presetId === null, 'null preset presetId default');
+        assert(out.presetName === null, 'null preset presetName default');
     }
 
     // expression path receives energy and attenuated bands

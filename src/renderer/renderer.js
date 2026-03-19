@@ -239,8 +239,6 @@ class MilkdropRendererApplication extends Gtk.Application {
                     const presetName = nextPreset?.name ?? 'preset cleared';
                     const presetPath = nextPreset?.path ?? null;
                     try {
-                        if (presetPath)
-                            glArea.changePreset(presetPath);
                         this._currentPreset = nextPreset;
                         this._bridgeStatusText = nextPreset
                             ? `preset loaded: ${presetName}`

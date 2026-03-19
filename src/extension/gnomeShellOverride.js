@@ -1,5 +1,3 @@
-/* eslint-disable no-invalid-this */
-
 import Clutter from 'gi://Clutter';
 import GObject from 'gi://GObject';
 import Meta from 'gi://Meta';
@@ -37,7 +35,7 @@ export class GnomeShellOverride {
             try {
                 if (GObject.Object.prototype.toString.call(actor).includes('DISPOSED'))
                     continue;
-                if (visible && typeof actor.ease === 'function')
+                if (typeof actor.ease === 'function')
                     actor.ease({ opacity, duration, mode });
                 else
                     actor.opacity = opacity;

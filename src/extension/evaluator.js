@@ -200,8 +200,8 @@ export class Evaluator {
             return {
                 ...frameState,
                 audio,
-                presetId: preset?.id ?? 'builtin:demo-wave',
-                presetName: preset?.name ?? 'Demo Wave',
+                presetId: preset?.id ?? null,
+                presetName: preset?.name ?? null,
                 blendProgress,
                 zoom,
                 rot,
@@ -242,8 +242,8 @@ export class Evaluator {
         return {
             ...frameState,
             audio,
-            presetId: preset?.id ?? 'builtin:demo-wave',
-            presetName: preset?.name ?? 'Demo Wave',
+            presetId: preset?.id ?? null,
+            presetName: preset?.name ?? null,
             blendProgress,
             zoom,
             rot,

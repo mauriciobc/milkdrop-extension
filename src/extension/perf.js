@@ -35,15 +35,3 @@ export function perfEnd(token) {
          MILKDROP_PERF_MARK: token.name,
          MILKDROP_PERF_DURATION_US: `${duration}`});
 }
-
-/**
- * Measure a synchronous function call. Returns the function's result.
- */
-export function perfMeasure(name, fn) {
-    if (!_sysprofEnabled)
-        return fn();
-    const token = perfBegin(name);
-    const result = fn();
-    perfEnd(token);
-    return result;
-}

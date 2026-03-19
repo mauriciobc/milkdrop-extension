@@ -8,64 +8,8 @@ export async function run(assert) {
 
     {
         const index = await store.loadIndex();
-        const ids = new Set(index.map(entry => entry.id));
-        const expected = [
-            'builtin:demo-wave',
-            'builtin:test-geiss-eggs',
-            'builtin:angular-drift',
-            'builtin:wave-pool',
-            'builtin:fractal-bloom',
-            'builtin:hypnotic-tunnel',
-            'builtin:particle-comet',
-            'builtin:supernova-kick',
-            'builtin:waveform-lattice',
-        ];
-
-        for (const id of expected)
-            assert(ids.has(id), `loadIndex includes ${id}`);
-    }
-
-    {
-        const preset = await store.loadPreset('builtin:test-geiss-eggs');
-        assert(preset.id === 'builtin:test-geiss-eggs', 'test-geiss-eggs preset has correct id');
-        assert(typeof preset.frame_eqs === 'string' && preset.frame_eqs.length > 0,
-            'test-geiss-eggs exposes frame_eqs for expression evaluation');
-        assert(typeof preset.pixel_eqs === 'string' && preset.pixel_eqs.length > 0,
-            'test-geiss-eggs exposes pixel_eqs for expression evaluation');
-    }
-
-    {
-        const preset = await store.loadPreset('builtin:fractal-bloom');
-        assert(preset.id === 'builtin:fractal-bloom', 'fractal-bloom preset has correct id');
-        assert(!preset.shaders, 'fractal-bloom has no shaders configured');
-    }
-
-    {
-        const preset = await store.loadPreset('builtin:particle-comet');
-        assert(preset.id === 'builtin:particle-comet', 'particle-comet preset has correct id');
-        assert(preset.shaders && typeof preset.shaders.draw === 'string', 'particle-comet is draw-only');
-        assert(!preset.shaders.warp && !preset.shaders.composite, 'particle-comet has no warp/composite shader');
-    }
-
-    {
-        const preset = await store.loadPreset('builtin:waveform-lattice');
-        assert(preset.id === 'builtin:waveform-lattice', 'waveform-lattice preset has correct id');
-        assert(preset.shaders && typeof preset.shaders.composite === 'string', 'waveform-lattice is composite-only');
-        assert(!preset.shaders.draw && !preset.shaders.warp, 'waveform-lattice has no draw/warp shader');
-    }
-
-    {
-        const preset = await store.loadPreset('builtin:supernova-kick');
-        assert(preset.id === 'builtin:supernova-kick', 'supernova-kick preset has correct id');
-        assert(preset.shaders && typeof preset.shaders.draw === 'string', 'supernova-kick is draw-only');
-        assert(!preset.shaders.warp && !preset.shaders.composite, 'supernova-kick has no warp/composite shader');
-    }
-
-    {
-        const first = await store.loadPreset('builtin:supernova-kick');
-        first.frame.zoom.base = 999;
-        const second = await store.loadPreset('builtin:supernova-kick');
-        assert(second.frame.zoom.base !== 999, 'loadPreset returns a clone and does not leak mutations');
+        assert(Array.isArray(index), 'loadIndex returns array');
+        assert(index.length === 0, 'loadIndex is empty when preset-directory is not configured');
     }
 
     {
@@ -102,6 +46,12 @@ export async function run(assert) {
                 'external .milk preset exposes frame_eqs');
             assert(typeof loaded.pixel_eqs === 'string' && loaded.pixel_eqs.includes('dx=rad*0.01'),
                 'external .milk preset exposes pixel_eqs');
+
+            // loadPreset must return a clone (no mutation leaks across calls).
+            const first = await externalStore.loadPreset(externalEntry.id);
+            first.frame_eqs = 'mutated';
+            const second = await externalStore.loadPreset(externalEntry.id);
+            assert(second.frame_eqs !== 'mutated', 'loadPreset returns a clone and does not leak mutations');
         } finally {
             const presetFile = Gio.File.new_for_path(presetPath);
             const dirFile = Gio.File.new_for_path(tempDir);
@@ -114,12 +64,6 @@ export async function run(assert) {
             } catch (_error) {
             }
         }
-    }
-
-    {
-        const preset = await store.loadPreset('builtin:hypnotic-tunnel');
-        assert(preset.shaders && typeof preset.shaders.draw === 'string', 'hypnotic tunnel exposes draw shader');
-        assert(preset.shaders && typeof preset.shaders.composite === 'string', 'hypnotic tunnel exposes composite shader');
     }
 
     {
@@ -167,6 +111,6 @@ export async function run(assert) {
         });
 
         const index = await guardedStore.loadIndex();
-        assert(index.length >= 9, 'missing preset-directory key falls back to built-in index without throwing');
+        assert(index.length === 0, 'missing preset-directory key returns empty index without throwing');
     }
 }

@@ -12,11 +12,10 @@ function readText(relativePath) {
 export function run(assert) {
     const rendererText = readText('src/renderer/renderer.js');
 
-    // Preset-load handling sends preset path to GL helper via changePreset.
     {
-        const hasPresetPathLoad = rendererText.includes('glArea.changePreset(presetPath)')
-            && rendererText.includes('const presetPath = nextPreset?.path ?? null');
-        assert(hasPresetPathLoad,
-            'renderer preset-load path sends preset file path to GL helper via changePreset');
+        // Preset-load handling now updates UI/status only; helper preset switching
+        // relies on presetPath arriving via the periodic frame payload.
+        assert(rendererText.includes('const presetPath = nextPreset?.path ?? null'),
+            'renderer preset-load still extracts presetPath for state/UI');
     }
 }

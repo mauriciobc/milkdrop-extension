@@ -38,6 +38,8 @@ extension_sources = files(
   'src/extension/perf.js',
   'src/extension/prefs.js',
   'src/extension/presets.js',
+  'src/extension/preset-crash-quarantine.js',
+  'src/extension/preset-probe-policy.js',
   'src/extension/windowTitle.js',
   'src/extension/wallpaper.js'
 )
@@ -100,6 +102,7 @@ else
 endif
 
 install_data(extension_sources, install_dir: extension_dir)
+install_data('src/extension/preset-loader-process.js', install_dir: join_paths(extension_dir, 'extension'))
 install_data(expr_sources, install_dir: join_paths(extension_dir, 'expr'))
 install_data(expr_sources, install_dir: join_paths(extension_dir, 'extension', 'expr'))
 install_data(renderer_sources, install_dir: join_paths(extension_dir, 'renderer'))

@@ -136,7 +136,6 @@ export class AudioEngine {
     }
 
     disable() {
-        // FIX: Use traditional if check instead of optional chaining with template literal
         if (this._log.info)
             this._log.info(`milkdrop audio disabling after ${this._spectrumCount} spectrum messages`);
         this._enabled = false;
@@ -217,13 +216,11 @@ export class AudioEngine {
         for (const c of candidates) {
             const desc = this._pipelineDesc(c.element);
             try {
-                // FIX: Use traditional if check
                 if (this._log.info)
                     this._log.info(`milkdrop audio pipeline starting (${reason}): ${desc}`);
                 const pipeline = Gst.parse_launch(desc);
                 if (pipeline.set_state(Gst.State.PLAYING) === Gst.StateChangeReturn.FAILURE) {
-                    // FIX: Use traditional if check
-                    if (this._log.warn)
+                        if (this._log.warn)
                         this._log.warn(`milkdrop audio state change failed for source=${c.source}`);
                     pipeline.set_state(Gst.State.NULL);
                     continue;
@@ -238,7 +235,6 @@ export class AudioEngine {
                 this._activeSource = c.source;
                 this._features.source = c.source;
                 this._features.active = false;
-                // FIX: Use traditional if check
                 if (this._log.warn)
                     this._log.warn(`milkdrop audio pipeline started source=${c.source} → PLAYING`);
 
@@ -255,18 +251,15 @@ export class AudioEngine {
                     this._noSpectrumWarnId = 0;
                     if (!this._enabled)
                         return GLib.SOURCE_REMOVE;
-                    // FIX: Use traditional if check
-                    if (this._log.warn)
+                        if (this._log.warn)
                         this._log.warn(`milkdrop audio: 2s check — pipeline=${!!this._pipeline} spectrumCount=${this._spectrumCount}`);
                     if (this._pipeline && this._spectrumCount === 0)
-                        // FIX: Use traditional if check
-                        if (this._log.warn)
+                                if (this._log.warn)
                             this._log.warn('milkdrop audio: no spectrum messages received after 2s');
                     return GLib.SOURCE_REMOVE;
                 });
                 return;
             } catch (e) {
-                // FIX: Use traditional if check
                 if (this._log.warn)
                     this._log.warn(`milkdrop audio candidate failed source=${c.source}: ${e.message}`);
             }
@@ -321,7 +314,6 @@ export class AudioEngine {
         this._restartAttempts += 1;
 
         if (this._restartAttempts > budget) {
-            // FIX: Use traditional if check
             if (this._log.warn)
                 this._log.warn('milkdrop audio restart budget exhausted; entering reprobe mode');
             this._stopPipeline();
@@ -345,7 +337,6 @@ export class AudioEngine {
         if (this._restartTimeoutId)
             return;
 
-        // FIX: Use traditional if check
         if (this._log.warn)
             this._log.warn(`milkdrop audio scheduling restart #${this._restartAttempts}: ${reason}`);
         this._restartTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, RESTART_DELAY_MSEC, () => {
@@ -371,7 +362,6 @@ export class AudioEngine {
         const {hasPipewire: pw, hasPulseSrc: pa, hasAutoSource: auto} = this._getSourceBackendAvailability();
         const candidates = [];
 
-        // FIX: Use traditional if check
         if (this._log.warn)
             this._log.warn(`milkdrop audio probe: pw=${pw} pa=${pa} auto=${auto} configured="${name}"`);
 
@@ -394,7 +384,6 @@ export class AudioEngine {
         if (pa) {
             candidates.push({source: 'pulse:@DEFAULT_MONITOR@', element: `pulsesrc device="${escapePipeline(DEFAULT_PULSE_MONITOR)}"`});
         } else if (pw || auto) {
-            // FIX: Use traditional if check
             if (this._log.warn)
                 this._log.warn('milkdrop audio auto: monitor unavailable; mic fallbacks disabled');
         }
@@ -422,13 +411,11 @@ export class AudioEngine {
                 });
                 if (id) {
                     this._busWatchId = id;
-                    // FIX: Use traditional if check
-                    if (this._log.warn)
+                        if (this._log.warn)
                         this._log.warn('milkdrop audio bus: add_watch attached');
                     return;
                 }
             } catch (e) {
-                // FIX: Use traditional if check
                 if (this._log.warn)
                     this._log.warn(`milkdrop audio add_watch unavailable: ${e.message}`);
             }
@@ -444,15 +431,13 @@ export class AudioEngine {
                         this._onBusMessage(msg);
                 });
                 if (this._busSignalHandlerId) {
-                    // FIX: Use traditional if check
-                    if (this._log.warn)
+                        if (this._log.warn)
                         this._log.warn('milkdrop audio bus: signal watch attached');
                     return;
                 }
                 this._bus.remove_signal_watch?.();
                 this._busSignalWatchEnabled = false;
             } catch (e) {
-                // FIX: Use traditional if check
                 if (this._log.warn)
                     this._log.warn(`milkdrop audio signal watch unavailable: ${e.message}`);
                 if (this._busSignalWatchEnabled) {
@@ -510,8 +495,7 @@ export class AudioEngine {
             if (!st || st.get_name() !== 'spectrum') {
                 if (!this._loggedNonSpectrumElement) {
                     this._loggedNonSpectrumElement = true;
-                    // FIX: Use traditional if check
-                    if (this._log.warn)
+                        if (this._log.warn)
                         this._log.warn(`milkdrop audio: unexpected ELEMENT name="${st?.get_name() ?? 'null'}"`);
                 }
                 break;
@@ -522,7 +506,6 @@ export class AudioEngine {
         case Gst.MessageType.ERROR: {
             const [err, dbg] = message.parse_error();
             const msg = err?.message ?? 'unknown';
-            // FIX: Use traditional if check
             if (this._log.warn)
                 this._log.warn(`milkdrop audio bus error: ${msg}${dbg ? ` debug=${dbg}` : ''}`);
             this._resetBeat();
@@ -534,7 +517,6 @@ export class AudioEngine {
         case Gst.MessageType.STATE_CHANGED:
             if (message.src === this._pipeline) {
                 const [, s] = message.parse_state_changed();
-                // FIX: Use traditional if check
                 if (this._log.info)
                     this._log.info(`milkdrop audio state → ${Gst.Element.state_get_name(s)}`);
             }
@@ -554,7 +536,6 @@ export class AudioEngine {
         if (!bands) {
             this._spectrumEmptyCount += 1;
             if (this._spectrumEmptyCount === 1 || this._spectrumEmptyCount % 60 === 0)
-                // FIX: Use traditional if check
                 if (this._log.info)
                     this._log.info(`milkdrop audio spectrum empty count=${this._spectrumEmptyCount}`);
             return;
@@ -599,11 +580,9 @@ export class AudioEngine {
             this._restartWindowStartUsec = 0;
             this._totalReprobeFailures = 0;
             const src = this._activeSource || 'stub';
-            // FIX: Use traditional if check
             if (this._log.warn)
                 this._log.warn(`milkdrop audio first spectrum source=${src} bands=${len}`);
             const raw = structure.to_string?.() ?? '';
-            // FIX: Use traditional if check
             if (this._log.warn)
                 this._log.warn(`milkdrop audio first spectrum raw (300): ${raw.slice(0, 300)}`);
         }
@@ -611,7 +590,6 @@ export class AudioEngine {
         // Periodic snapshot
         if (now - this._lastSnapshotUsec >= SNAPSHOT_INTERVAL_USEC) {
             this._lastSnapshotUsec = now;
-            // FIX: Use traditional if check
             if (this._log.debug)
                 this._log.debug(`milkdrop audio #${this._spectrumCount} E=${energy.toFixed(3)} B=${bass.toFixed(3)} M=${mid.toFixed(3)} H=${high.toFixed(3)} beat=${beat}`);
         }
@@ -631,7 +609,6 @@ export class AudioEngine {
         // Debug sample every 50 frames
         if (this._spectrumCount % 50 === 0) {
             const out = this.getFeatures();
-            // FIX: Use traditional if check
             if (this._log.warn)
                 this._log.warn(
                     `milkdrop audio #${this._spectrumCount} raw E=${energy.toFixed(3)} B=${bass.toFixed(3)} M=${mid.toFixed(3)} H=${high.toFixed(3)} → out E=${out.energy.toFixed(3)} B=${out.bass.toFixed(3)} M=${out.mid.toFixed(3)} H=${out.high.toFixed(3)}`
@@ -640,7 +617,6 @@ export class AudioEngine {
 
         // Beat debug logging (restored from Version 1)
         if (beat && GLib.getenv('MILKDROP_DEBUG_BEAT') === '1') {
-            // FIX: Use traditional if check
             if (this._log.warn)
                 this._log.warn(`milkdrop beat #${this._spectrumCount} detected`);
         }
@@ -669,7 +645,6 @@ export class AudioEngine {
         if (GLib.getenv('MILKDROP_DEBUG_BEAT') === '1') {
             const debugBeat = eBeat || bBeat;
             if (debugBeat || this._spectrumCount % 20 === 0) {
-                // FIX: Use traditional if check
                 if (this._log.warn)
                     this._log.warn(
                         `milkdrop beat debug #${this._spectrumCount}: ` +
@@ -684,7 +659,6 @@ export class AudioEngine {
 
         if (eBeat || bBeat) {
             this._beatCooldown = BEAT_COOLDOWN_FRAMES;
-            // FIX: Use traditional if check
             if (this._log.info)
                 this._log.info(`milkdrop beat #${this._spectrumCount} (energy=${eBeat} bass=${bBeat})`);
             return 1;
@@ -842,7 +816,6 @@ export class AudioEngine {
         } catch (e) {
             this._parserErrors += 1;
             if (shouldLogError(this._parserErrors))
-                // FIX: Use traditional if check
                 if (this._log.debug)
                     this._log.debug(`milkdrop audio structured parser error #${this._parserErrors}: ${e.message}`);
         }
@@ -874,8 +847,7 @@ export class AudioEngine {
             } catch (e) {
                 this._variantErrors += 1;
                 if (shouldLogError(this._variantErrors))
-                    // FIX: Use traditional if check
-                    if (this._log.debug)
+                        if (this._log.debug)
                         this._log.debug(`milkdrop audio value_array error #${this._variantErrors}: ${e.message}`);
             }
         }
@@ -900,8 +872,7 @@ export class AudioEngine {
                     } catch (e) {
                         this._variantErrors += 1;
                         if (shouldLogError(this._variantErrors))
-                            // FIX: Use traditional if check
-                            if (this._log.debug)
+                                        if (this._log.debug)
                                 this._log.debug(`milkdrop audio variant child error #${this._variantErrors}: ${e.message}`);
                     }
                 }
@@ -914,7 +885,6 @@ export class AudioEngine {
         } catch (e) {
             this._variantErrors += 1;
             if (shouldLogError(this._variantErrors))
-                // FIX: Use traditional if check
                 if (this._log.debug)
                     this._log.debug(`milkdrop audio variant parser error #${this._variantErrors}: ${e.message}`);
         }
@@ -962,7 +932,6 @@ export class AudioEngine {
         const base = this._getSetting('int', 'audio-reprobe-delay-ms', DEFAULT_SOURCE_REPROBE_DELAY_MSEC, MIN_SOURCE_REPROBE_DELAY_MSEC, 120000);
         // Bit-shift for 2^n, capped to avoid overflow
         const delay = Math.min(MAX_REPROBE_DELAY_MSEC, base * (1 << Math.min(this._totalReprobeFailures, 15)));
-        // FIX: Use traditional if check
         if (this._log.info)
             this._log.info(`milkdrop audio reprobe in ${delay}ms (failures=${this._totalReprobeFailures})`);
 
@@ -972,7 +941,6 @@ export class AudioEngine {
                 return GLib.SOURCE_REMOVE;
             if (this._pipeline && this._hasRecentSignal())
                 return GLib.SOURCE_REMOVE;
-            // FIX: Use traditional if check
             if (this._log.info)
                 this._log.info('milkdrop audio reprobe: retrying source selection');
             this._startPipeline('source-reprobe');
@@ -996,7 +964,7 @@ export class AudioEngine {
             active: false,
             energy: 0, bass: 0, mid: 0, high: 0,
             beat: 0, decay: 0,
-            waveData: [],  // ← FIXED: Added missing waveData
+            waveData: [],
             pcmLeft: new Float32Array(PCM_SAMPLES),
             pcmRight: new Float32Array(PCM_SAMPLES),
         };

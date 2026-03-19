@@ -1,9 +1,74 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
-import { parseCodeBlock, parsePresetValues } from './milk-parser.js';
+import System from 'system';
 
 function _printJson(obj) {
     print(JSON.stringify(obj));
+}
+
+function _parsePresetValues(content) {
+    const values = {};
+    const lines = content.split('\n');
+    let currentSection = null;
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+
+        const sectionMatch = trimmed.match(/^\[(\w+)\]$/);
+        if (sectionMatch) {
+            currentSection = sectionMatch[1];
+            if (currentSection.startsWith('preset'))
+                values.name = currentSection;
+            continue;
+        }
+
+        if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('#'))
+            continue;
+
+        const eqIdx = trimmed.indexOf('=');
+        if (eqIdx === -1) {
+            const spaceIdx = trimmed.indexOf(' ');
+            if (spaceIdx > 0) {
+                const key = trimmed.substring(0, spaceIdx).trim();
+                const val = trimmed.substring(spaceIdx + 1).trim();
+                if (key && val)
+                    values[key] = val;
+            }
+            continue;
+        }
+
+        const key = trimmed.substring(0, eqIdx).trim();
+        const val = trimmed.substring(eqIdx + 1).trim();
+        if (!key)
+            continue;
+        values[key] = val;
+    }
+    return values;
+}
+
+function _parseCodeBlock(content, prefix) {
+    const lines = content.split('\n');
+    let code = '';
+    let inBlock = false;
+    let lastNum = -1;
+
+    for (const line of lines) {
+        const match = line.match(new RegExp(`^${prefix}(\\d+)=(.*)`));
+        if (!match) {
+            if (inBlock)
+                break;
+            continue;
+        }
+
+        const num = parseInt(match[1]);
+        if (lastNum !== -1 && num !== lastNum + 1)
+            break;
+
+        inBlock = true;
+        lastNum = num;
+        code += match[2] + '\n';
+    }
+    return code;
 }
 
 function _readText(path) {
@@ -23,18 +88,17 @@ function _listMilkFiles(dirPath) {
             Gio.FileQueryInfoFlags.NONE,
             null
         );
-        while (true) {
-            const infos = enumerator.next_files(64, null);
-            if (!infos || infos.length === 0)
+        for (;;) {
+            const info = enumerator.next_file(null);
+            if (!info)
                 break;
-            for (const info of infos) {
-                if (info.get_file_type() !== Gio.FileType.REGULAR)
-                    continue;
-                const name = info.get_name();
-                if (!name.endsWith('.milk'))
-                    continue;
-                out.push(GLib.build_filenamev([dirPath, name]));
-            }
+
+            if (info.get_file_type() !== Gio.FileType.REGULAR)
+                continue;
+            const name = info.get_name();
+            if (!name.endsWith('.milk'))
+                continue;
+            out.push(GLib.build_filenamev([dirPath, name]));
         }
     } finally {
         try { enumerator?.close(null); } catch (_e) {}
@@ -44,10 +108,10 @@ function _listMilkFiles(dirPath) {
 }
 
 function _buildPresetFromMilkText(text, absPath) {
-    const values = parsePresetValues(text);
-    const frame_eqs = parseCodeBlock(text, 'per_frame_');
-    const pixel_eqs = parseCodeBlock(text, 'per_pixel_');
-    const init_eqs = parseCodeBlock(text, 'init_');
+    const values = _parsePresetValues(text);
+    const frame_eqs = _parseCodeBlock(text, 'per_frame_');
+    const pixel_eqs = _parseCodeBlock(text, 'per_pixel_');
+    const init_eqs = _parseCodeBlock(text, 'init_');
 
     const name = (typeof values?.name === 'string' && values.name.trim())
         ? values.name.trim()
@@ -89,5 +153,5 @@ function main(argv) {
     }
 }
 
-GLib.exit(main(ARGV));
+System.exit(main(ARGV));
 

@@ -14,6 +14,8 @@ import {IpcServer} from './ipc.js';
 import {MprisWatcher} from './mpris-watcher.js';
 import {perfBegin, perfEnd} from './perf.js';
 import {PresetStore} from './presets.js';
+import {PresetCrashQuarantine} from './preset-crash-quarantine.js';
+import {shouldCommitByFrames, shouldCommitByTimeout} from './preset-probe-policy.js';
 import {parseRendererWindowTitle, RENDERER_TITLE_PREFIX} from './windowTitle.js';
 
 const HOTPLUG_RESTART_DEBOUNCE_MS = 150;
@@ -23,6 +25,8 @@ const NOTIFICATION_COOLDOWN_MS = 10000;
 const DEFAULT_BEAT_CUT_COOLDOWN_SEC = 2.0;
 const MEDIA_OVERLAY_FADE_MS = 400;
 const VALID_ROTATION_MODES = new Set(['random', 'sequential']);
+const PROBE_MIN_STABLE_FRAMES = 20;
+const PROBE_TIMEOUT_MS = 5000;
 /** When MILKDROP_DEBUG_HANG=1, warn if frame pump or evaluator exceeds this (µs). */
 const SLOW_FRAME_THRESHOLD_US = 50000;
 
@@ -232,7 +236,7 @@ class ManagedRendererWindow {
 }
 
 class RendererProcess {
-    constructor({extensionPath, monitor, logger, strictRenderPath = false, textOverlayVisible = true, onNotify = null, onExit = null}) {
+    constructor({extensionPath, monitor, logger, strictRenderPath = false, textOverlayVisible = true, onNotify = null, onExit = null, onHelperCrashed = null}) {
         this._extensionPath = extensionPath;
         this._monitor = monitor;
         this._logger = logger;
@@ -241,6 +245,7 @@ class RendererProcess {
         this._pendingTextOverlayVisible = this._textOverlayVisible;
         this._onNotify = onNotify;
         this._onExit = onExit;
+        this._onHelperCrashed = onHelperCrashed;
         this._waylandClient = null;
         this._stdout = null;
         this._cancellable = new Gio.Cancellable();
@@ -479,6 +484,14 @@ class RendererProcess {
             source: preset.source,
             path: preset.path ?? null,
             frame: preset.frame,
+            // Preserve expression payload so downstream protocol consumers can
+            // access it without reloading the preset from disk.
+            baseVals: preset.baseVals,
+            init_eqs: preset.init_eqs,
+            frame_eqs: preset.frame_eqs,
+            pixel_eqs: preset.pixel_eqs,
+            shapes: preset.shapes ?? preset.customShapes,
+            waves: preset.waves ?? preset.customWaves,
         } : null;
         this._lastQueuedPreset = this._pendingPresetLoad;
         this._flushPendingPresetLoad();
@@ -525,6 +538,7 @@ class RendererProcess {
                 `milkdrop helper crashed on monitor ${this._monitor.index}: ${message.stage ?? 'unknown'} ${message.msg ?? ''}`
             );
             this._onNotify?.('GL Helper Crashed', `Monitor ${this._monitor.index}: ${message.msg ?? message.stage ?? 'unknown error'}`);
+            this._onHelperCrashed?.(message);
             break;
         case 'fps':
             this._logger.debug?.(`milkdrop renderer FPS monitor ${this._monitor.index}: ${message.value}`);
@@ -606,7 +620,31 @@ export class MonitorManager {
             logger: this._logger,
             onFallback: (title, body) => this._notifyUser(title, body),
         });
-        this._currentPreset = this._presetStore.getBootstrapPreset();
+        // Preset selection is based on external `.milk` files from
+        // `preset-directory`. When none are available, we keep the renderer's
+        // helper default preset and disable automatic rotation.
+        this._currentPreset = null;
+        // Only enable passing `presetPath` to the helper after the preset
+        // has been accepted by the evaluator (prevents feeding presets that
+        // may be incompatible with the evaluator/parser).
+        this._helperPresetEnabled = false;
+        this._crashQuarantine = new PresetCrashQuarantine();
+        // Probe/graceful commit state:
+        this._probeActive = false;
+        this._probePresetId = null;
+        this._probePreset = null;
+        this._probeCrashed = false;
+        this._probeFrameTarget = 0;
+        this._probeTimeoutId = 0;
+        this._lastStablePreset = null;
+        this._presetFileCount = 0;
+        this._presetEligibleFileCount = 0;
+        this._quarantineDebugLoggedIds = new Set();
+        // Session-only set to avoid repeated probe attempts on presets that
+        // the evaluator rejects (syntax/parser/expr compilation errors).
+        this._evaluatorRejectedPresetIds = new Set();
+        // Fallback: last rejected preset id for selection skipping.
+        this._lastRejectedPresetId = null;
         this._rendererProcesses = new Map();
         this._managedWindows = new Map();
         this._monitorSignals = [];
@@ -635,6 +673,7 @@ export class MonitorManager {
         this._sequentialRotationCursor = 0;
         this._crashTimestamps = [];
         this._lastOverlayVisible = null;
+        this._stopAfterFadeId = 0;
         this._dbusOwnerId = 0;
         this._dbusExportedObject = null;
 
@@ -734,16 +773,35 @@ export class MonitorManager {
             this._audioEngine.enable();
             this._mprisWatcher.enable();
             this._exportDbusStatus();
-            // When "only when media playing" is on, don't spawn until there's playback — avoids showing fallback at all
-            const showOnlyWhenMedia = this._getBooleanSetting('show-only-when-media-playing', false);
-            const shouldShowNow = !showOnlyWhenMedia || this._mprisWatcher?.hasActivePlayback;
-            if (shouldShowNow)
-                this._spawnForCurrentMonitors();
-            this._applyTextOverlaySetting();
-            this._startFramePump();
-            this._startPresetRotation();
-            this._checkHelperAvailability();
-            this._checkVisibility();
+            // Async preset-directory scan so we can initialize the renderer
+            // with an actual file-backed preset (the helper only switches
+            // when it receives a `presetPath` with a real file path).
+            (async () => {
+                const filePresetCount = await this._initialisePresetSelection();
+
+                // When "only when media playing" is on, don't spawn until there's playback.
+                const showOnlyWhenMedia = this._getBooleanSetting('show-only-when-media-playing', false);
+                const shouldShowNow = !showOnlyWhenMedia || this._mprisWatcher?.hasActivePlayback;
+                if (shouldShowNow)
+                    this._spawnForCurrentMonitors();
+
+                this._applyTextOverlaySetting();
+                this._startFramePump();
+
+                // Only rotate when we have at least 2 external presets.
+                if (filePresetCount >= 2)
+                    this._startPresetRotation();
+
+                this._checkHelperAvailability();
+                this._checkVisibility();
+            })().catch(error => {
+                this._logger.debug?.(`milkdrop preset init failed: ${error.message}`);
+                // Still keep the renderer running with helper defaults.
+                this._applyTextOverlaySetting();
+                this._startFramePump();
+                this._checkHelperAvailability();
+                this._checkVisibility();
+            });
             return GLib.SOURCE_REMOVE;
         });
     }
@@ -776,6 +834,11 @@ export class MonitorManager {
         this._enabled = false;
         this._paused = false;
         this._audioEngine.disable();
+
+        if (this._stopAfterFadeId) {
+            GLib.source_remove(this._stopAfterFadeId);
+            this._stopAfterFadeId = 0;
+        }
 
         if (this._enableIdleId) {
             GLib.source_remove(this._enableIdleId);
@@ -917,6 +980,7 @@ export class MonitorManager {
                 textOverlayVisible: this._getBooleanSetting('text-overlay-enabled', true),
                 onNotify: (title, body) => this._notifyUser(title, body),
                 onExit: (monitorIndex) => this._onRendererExit(monitorIndex),
+                onHelperCrashed: message => this._handleHelperCrashed(message),
             });
             process.launch();
             process.queuePresetLoad(this._currentPreset);
@@ -948,6 +1012,15 @@ export class MonitorManager {
                     return GLib.SOURCE_CONTINUE;
 
                 this._frameCounter += 1;
+
+                if (shouldCommitByFrames({
+                    probeActive: this._probeActive,
+                    probeCrashed: this._probeCrashed,
+                    frameCounter: this._frameCounter,
+                    probeFrameTarget: this._probeFrameTarget,
+                })) {
+                    this._commitProbe('frames');
+                }
 
                 const pumpToken = perfBegin('frame-pump');
 
@@ -983,15 +1056,230 @@ export class MonitorManager {
             this._logger.info?.(`milkdrop [extension] frame pump started fpsLimit=${fpsLimit} intervalMs=${intervalMs}`);
     }
 
+    _cancelProbeTimers() {
+        if (this._probeTimeoutId) {
+            GLib.source_remove(this._probeTimeoutId);
+            this._probeTimeoutId = 0;
+        }
+    }
+
+    _beginProbe(preset, reason = 'probe') {
+        if (!preset || !preset.id)
+            return false;
+
+        if (this._probeActive) {
+            // Never stack probes; caller should have checked.
+            return false;
+        }
+
+        this._probeActive = true;
+        this._probePreset = preset;
+        this._probePresetId = preset.id;
+        this._probeCrashed = false;
+        this._probeFrameTarget = this._frameCounter + PROBE_MIN_STABLE_FRAMES;
+
+        // Timeout safety: if we don't get a crash signal, still commit
+        // after PROBE_TIMEOUT_MS to avoid waiting indefinitely.
+        this._cancelProbeTimers();
+        const startedAt = GLib.get_monotonic_time() / 1000;
+        this._probeTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, PROBE_TIMEOUT_MS, () => {
+            if (!this._probeActive)
+                return GLib.SOURCE_REMOVE;
+            const now = GLib.get_monotonic_time() / 1000;
+            if (shouldCommitByTimeout({
+                probeActive: this._probeActive,
+                probeCrashed: this._probeCrashed,
+                nowMs: now,
+                probeStartMs: startedAt,
+                probeTimeoutMs: PROBE_TIMEOUT_MS,
+            })) {
+                this._commitProbe('timeout');
+            }
+            return GLib.SOURCE_REMOVE;
+        });
+
+        this._logger.warn?.(
+            `milkdrop probe started presetId=${preset.id} reason=${reason} frameTarget=${this._probeFrameTarget}`
+        );
+
+        // Apply candidate as provisional; helper will load it based on
+        // `evaluated.presetPath` produced by `_buildFrameState()`.
+        this._applyPreset(preset, `probe:${reason}`);
+
+        // If the evaluator rejected the preset, the helper won't load it
+        // (no `presetPath`). In that case, end the probe without committing.
+        if (!this._helperPresetEnabled) {
+            // Treat evaluator rejection as "bad preset" for session-only
+            // quarantine. Otherwise sequential rotation can keep selecting
+            // the same candidate and never progress.
+            const debugId = String(preset.id);
+            this._evaluatorRejectedPresetIds.add(debugId);
+            this._lastRejectedPresetId = debugId;
+            if (!this._quarantineDebugLoggedIds.has(debugId)) {
+                this._logger.warn?.(`milkdrop quarantine debug marker: evaluator-rejected presetId=${debugId}`);
+                this._quarantineDebugLoggedIds.add(debugId);
+            }
+
+            try {
+                this._crashQuarantine.recordCrash(preset.id);
+                const nowBlacklisted = this._crashQuarantine.isBlacklisted(preset.id);
+                if (!nowBlacklisted)
+                    this._logger.warn?.(`milkdrop quarantine debug: evaluator-rejected presetId=${debugId} isBlacklisted=false`);
+            } catch (_e) {}
+
+            this._cancelProbeTimers();
+            this._probeActive = false;
+            this._probePreset = null;
+            this._probePresetId = null;
+            this._probeCrashed = false;
+            this._probeFrameTarget = 0;
+
+            if (this._lastStablePreset)
+                this._applyPreset(this._lastStablePreset, 'probe-eval-failed');
+            else {
+                this._currentPreset = null;
+                this._evaluator.loadPreset(null);
+            }
+
+            this._logger.warn?.(`milkdrop probe ended early: evaluator rejected presetId=${preset.id}`);
+
+            // Important for rotation progress:
+            // - helper/evaluator should remain on the last stable preset,
+            // - but preset selection should move past the rejected candidate.
+            this._currentPreset = preset;
+            this._helperPresetEnabled = false;
+            return false;
+        }
+        return true;
+    }
+
+    _commitProbe(reason = 'commit') {
+        if (!this._probeActive || this._probeCrashed)
+            return;
+
+        this._cancelProbeTimers();
+        this._lastStablePreset = this._probePreset;
+
+        this._probeActive = false;
+        this._probePreset = null;
+        this._probePresetId = null;
+        this._probeCrashed = false;
+        this._probeFrameTarget = 0;
+
+        if (this._lastStablePreset)
+            this._logger.warn?.(`milkdrop probe committed stable presetId=${this._lastStablePreset.id} reason=${reason}`);
+    }
+
+    _rollbackProbe(meta = {}) {
+        if (!this._probeActive)
+            return;
+
+        const crashedPresetId = this._probePresetId;
+
+        this._probeCrashed = true;
+        this._cancelProbeTimers();
+
+        try {
+            this._crashQuarantine.recordCrash(crashedPresetId);
+        } catch (_e) {}
+
+        const rollbackPreset = this._lastStablePreset ?? null;
+        this._probeActive = false;
+        this._probePreset = null;
+        this._probePresetId = null;
+        this._probeFrameTarget = 0;
+
+        if (rollbackPreset)
+            this._applyPreset(rollbackPreset, 'probe-rollback');
+        else {
+            this._currentPreset = null;
+            this._helperPresetEnabled = false;
+            this._evaluator.loadPreset(null);
+        }
+
+        this._logger.warn?.(
+            `milkdrop probe rollback crashedPresetId=${crashedPresetId} stage=${meta?.stage ?? 'unknown'} msg=${meta?.msg ?? ''}`
+        );
+    }
+
+    _handleHelperCrashed(message) {
+        if (!this._probeActive)
+            return;
+
+        this._rollbackProbe(message);
+    }
+
+    /**
+     * Initialize the selected preset based on `preset-directory` contents.
+     * Returns the number of external presets found so rotation can be enabled
+     * only when there are enough entries.
+     */
+    async _initialisePresetSelection() {
+        const index = await this._presetStore.loadIndex();
+        const filePresets = index.filter(entry => entry?.source === 'file');
+
+        this._presetFileCount = filePresets.length;
+        this._presetEligibleFileCount = 0;
+        this._sequentialRotationCursor = 0;
+        this._logger.info?.(`milkdrop presets available (external .milk): ${this._presetFileCount}`);
+
+        // Reset probe/stability for a fresh selection pass.
+        this._cancelProbeTimers();
+        this._probeActive = false;
+        this._probePreset = null;
+        this._probePresetId = null;
+        this._probeCrashed = false;
+        this._probeFrameTarget = 0;
+        this._lastStablePreset = null;
+
+        if (filePresets.length === 0) {
+            this._currentPreset = null;
+            this._helperPresetEnabled = false;
+            this._evaluator.loadPreset(null);
+            return 0;
+        }
+
+        const eligiblePresets = this._crashQuarantine
+            .filterEligible(filePresets)
+            .filter(entry => entry?.id != null && !this._evaluatorRejectedPresetIds.has(String(entry.id)));
+        this._presetEligibleFileCount = eligiblePresets.length;
+
+        if (eligiblePresets.length === 0) {
+            this._currentPreset = null;
+            this._helperPresetEnabled = false;
+            this._evaluator.loadPreset(null);
+            return 0;
+        }
+
+        const mode = this._getPresetRotationMode();
+        const initialEntry = mode === 'sequential'
+            ? eligiblePresets[0]
+            : eligiblePresets[Math.floor(Math.random() * eligiblePresets.length)];
+
+        const initialPreset = await this._presetStore.loadPreset(initialEntry.id);
+        // Start probe immediately. Commit happens once the helper stays alive
+        // for PROBE_MIN_STABLE_FRAMES (or timeout).
+        this._beginProbe(initialPreset, 'initial');
+        return eligiblePresets.length;
+    }
+
     _startPresetRotation() {
         if (this._presetRotationId) {
             GLib.source_remove(this._presetRotationId);
             this._presetRotationId = 0;
         }
 
+        // Avoid timer churn when there aren't enough eligible presets.
+        if ((this._presetEligibleFileCount ?? 0) < 2)
+            return;
+
         const intervalSec = this._getIntSetting('preset-rotation-interval', 60);
         if (intervalSec <= 0)
             return;
+
+        this._logger.info?.(
+            `milkdrop preset rotation enabled eligibleCount=${this._presetEligibleFileCount} intervalSec=${intervalSec} mode=${this._getPresetRotationMode()}`
+        );
 
         this._presetRotationId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, intervalSec, () => {
             if (!this._enabled || this._disabling) {
@@ -1010,17 +1298,30 @@ export class MonitorManager {
             if (!this._enabled || index.length <= 1)
                 return;
 
+            if (this._probeActive)
+                return;
+
             const fileIndex = index.filter(entry => entry?.source === 'file');
             const rotationIndex = fileIndex.length > 0 ? fileIndex : index;
 
-            const nextPresetId = this._selectNextPresetId(rotationIndex);
+            const eligibleIndex = this._crashQuarantine
+                .filterEligible(rotationIndex)
+                .filter(entry => entry?.id != null && !this._evaluatorRejectedPresetIds.has(String(entry.id)));
+            if (eligibleIndex.length <= 1)
+                return;
+
+            const nextPresetId = this._selectNextPresetId(eligibleIndex);
             if (!this._enabled || !nextPresetId)
                 return;
+
+            this._logger.info?.(`milkdrop preset rotation tick eligible=${eligibleIndex.length} nextPresetId=${nextPresetId}`);
 
             const preset = await this._presetStore.loadPreset(nextPresetId);
             if (!this._enabled)
                 return;
-            this._applyPreset(preset, 'rotated');
+
+            // Probe/graceful-commit: avoid committing a preset that can crash the helper.
+            this._beginProbe(preset, 'rotated');
         } catch (error) {
             this._logger.debug?.(`milkdrop preset rotation failed: ${error.message}`);
         }
@@ -1028,18 +1329,36 @@ export class MonitorManager {
 
     _selectNextPresetId(index) {
         const mode = this._getPresetRotationMode();
+        const currentId = this._currentPreset?.id != null ? String(this._currentPreset.id) : null;
+        const lastRejectedId = this._lastRejectedPresetId != null ? String(this._lastRejectedPresetId) : null;
         if (mode === 'sequential') {
-            let nextIndex = index.findIndex(entry => entry.id === this._currentPreset?.id);
+            let nextIndex = index.findIndex(entry => entry?.id != null && String(entry.id) === currentId);
             if (nextIndex >= 0)
                 nextIndex = (nextIndex + 1) % index.length;
             else
                 nextIndex = this._sequentialRotationCursor % index.length;
 
             this._sequentialRotationCursor = (nextIndex + 1) % index.length;
+
+            // Skip the most recently rejected preset to avoid immediate ping-pong.
+            if (lastRejectedId && index[nextIndex]?.id != null) {
+                const start = nextIndex;
+                do {
+                    if (String(index[nextIndex].id) !== lastRejectedId)
+                        return index[nextIndex]?.id ?? null;
+                    nextIndex = (nextIndex + 1) % index.length;
+                } while (nextIndex !== start);
+            }
+
             return index[nextIndex]?.id ?? null;
         }
 
-        const candidates = index.filter(entry => entry.id !== this._currentPreset?.id);
+        let candidates = index.filter(entry => entry?.id != null && String(entry.id) !== currentId);
+        if (lastRejectedId)
+            candidates = candidates.filter(entry => String(entry.id) !== lastRejectedId);
+        if (candidates.length === 0)
+            candidates = index.filter(entry => entry?.id != null && String(entry.id) !== currentId);
+
         if (candidates.length === 0)
             return null;
 
@@ -1049,15 +1368,24 @@ export class MonitorManager {
 
     _applyPreset(preset, reason = 'updated') {
         try {
+            const presetForHelper = preset ?? null;
+
             const blendTime = Math.max(0, this._getDoubleSetting('blend-time', 0));
-            this._evaluator.loadPreset(preset, blendTime);
+            this._evaluator.loadPreset(presetForHelper, blendTime);
 
+            this._currentPreset = presetForHelper;
+            this._helperPresetEnabled = presetForHelper?.source === 'file';
+
+            // projectM/helper will switch on the next rendered frame when
+            // `presetPath` is present (derived from _currentPreset).
             for (const process of this._rendererProcesses.values())
-                process.queuePresetLoad(preset);
+                process.queuePresetLoad(presetForHelper);
 
-            this._currentPreset = preset;
-            this._logger.info?.(`milkdrop [TEST] Loading preset ID: ${preset.id} - Name: ${preset.name} - Reason: ${reason}`);
+            if (presetForHelper)
+                this._logger.info?.(`milkdrop loading preset ID: ${presetForHelper.id} Name: ${presetForHelper.name} Reason: ${reason}`);
         } catch (error) {
+            this._currentPreset = null;
+            this._helperPresetEnabled = false;
             this._logger.warn?.(`milkdrop failed to apply preset "${preset?.name ?? 'unknown'}": ${error.message}`);
         }
     }
@@ -1069,17 +1397,16 @@ export class MonitorManager {
         if (!this._enabled || this._disabling)
             return;
 
-        if (this._currentPreset?.source !== 'file')
-            return;
-
         try {
-            const reloaded = await this._presetStore.loadPreset(this._currentPreset.id);
+            await this._initialisePresetSelection();
+
             if (!this._enabled || this._disabling)
                 return;
-            this._applyPreset(reloaded, 'reloaded after preset directory change');
-        } catch (_error) {
-            const fallbackPreset = this._presetStore.getBootstrapPreset();
-            this._applyPreset(fallbackPreset, 'reset to bootstrap after preset directory change');
+
+            // Rotation enablement depends on preset count.
+            this._startPresetRotation();
+        } catch (error) {
+            this._logger.debug?.(`milkdrop preset directory re-init failed: ${error.message}`);
         }
     }
 
@@ -1154,6 +1481,12 @@ export class MonitorManager {
         if (visible === this._lastOverlayVisible)
             return;
         this._lastOverlayVisible = visible;
+
+        if (visible && this._stopAfterFadeId) {
+            GLib.source_remove(this._stopAfterFadeId);
+            this._stopAfterFadeId = 0;
+        }
+
         const targetOpacity = visible ? 255 : 0;
         const duration = MEDIA_OVERLAY_FADE_MS;
         const mode = Clutter.AnimationMode.EASE_OUT_QUAD;
@@ -1170,19 +1503,32 @@ export class MonitorManager {
                 if (!actor || _isDisposed(actor))
                     continue;
                 matchCount++;
-                if (targetOpacity === 0) {
-                    actor.remove_all_transitions?.();
-                    actor.opacity = 0;
-                } else if (typeof actor.ease === 'function') {
-                    actor.ease({ opacity: 255, duration, mode });
+                actor.remove_all_transitions?.();
+                if (typeof actor.ease === 'function') {
+                    actor.ease({ opacity: targetOpacity, duration, mode });
                 } else {
-                    actor.opacity = 255;
+                    actor.opacity = targetOpacity;
                 }
             } catch (_e) {}
         }
 
         this._logger.warn?.(`milkdrop applyVisibility: visible=${visible} matchedWindows=${matchCount} managedWindows=${this._managedWindows.size}`);
         this._gnomeShellOverride?.setMediaOverlayVisibility?.(visible);
+
+        if (!visible && showOnlyWhenMedia && this._rendererProcesses.size > 0) {
+            if (this._stopAfterFadeId)
+                GLib.source_remove(this._stopAfterFadeId);
+            this._stopAfterFadeId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, duration, () => {
+                this._stopAfterFadeId = 0;
+                if (!this._enabled || this._disabling)
+                    return GLib.SOURCE_REMOVE;
+                const stillVisible = !showOnlyWhenMedia || this._mprisWatcher?.hasActivePlayback;
+                if (stillVisible)
+                    return GLib.SOURCE_REMOVE;
+                this._stopAll();
+                return GLib.SOURCE_REMOVE;
+            });
+        }
     }
 
     /**
@@ -1208,6 +1554,7 @@ export class MonitorManager {
             ShowOnlyWhenMediaPlaying: GLib.Variant.new_boolean(showOnlyWhenMedia),
             HasActivePlayback: GLib.Variant.new_boolean(hasActivePlayback),
             RendererCount: GLib.Variant.new_uint32(this._rendererProcesses.size),
+            PresetCount: GLib.Variant.new_uint32(this._presetFileCount ?? 0),
             WindowTitles: GLib.Variant.new_strv(titles),
         };
         return new GLib.Variant('a{sv}', status);
@@ -1279,7 +1626,7 @@ export class MonitorManager {
         };
 
         // Preset path for projectM backend.
-        if (this._currentPreset?.source === 'file' && this._currentPreset?.id?.startsWith?.('file:')) {
+        if (this._helperPresetEnabled && this._currentPreset?.source === 'file' && this._currentPreset?.id?.startsWith?.('file:')) {
             evaluated.presetPath = this._currentPreset.id.replace(/^file:/, '');
         } else {
             evaluated.presetPath = undefined;
@@ -1406,6 +1753,7 @@ export class MonitorManager {
                 if (capturedEntry.unmanagedId && !_isDisposed(capturedWindow))
                     capturedWindow.disconnect(capturedEntry.unmanagedId);
             } catch (_error) {
+                this._logger.debug?.(`milkdrop window disconnect ignored: ${_error?.message}`);
             }
             capturedEntry.managedWindow?.disconnect?.();
             capturedEntry.process?.clearWindowManaged?.();

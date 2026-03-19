@@ -583,7 +583,10 @@ export class PresetStore {
 
     async loadIndex() {
         await this._ensureExternalLoaded();
-        return [...BUILTIN_PRESETS, ...this._externalPresets].map(p => ({
+        // Rotation/selection should only consider externally managed presets.
+        // Built-in presets are intentionally excluded so the renderer can always
+        // receive a valid file path via `presetPath` / `preset-change`.
+        return this._externalPresets.map(p => ({
             id: p.id,
             name: p.name,
             description: p.description,
@@ -591,9 +594,9 @@ export class PresetStore {
         }));
     }
 
-    async loadPreset(presetId = BOOTSTRAP_PRESET.id) {
+    async loadPreset(presetId) {
         await this._ensureExternalLoaded();
-        const preset = [...BUILTIN_PRESETS, ...this._externalPresets].find(p => p.id === presetId);
+        const preset = this._externalPresets.find(p => p.id === presetId);
         if (!preset)
             throw new Error(`Unknown preset: ${presetId}`);
 
@@ -601,7 +604,9 @@ export class PresetStore {
     }
 
     getBootstrapPreset() {
-        return clonePreset(BOOTSTRAP_PRESET);
+        // Compatibility hook: no built-in presets are exposed anymore.
+        // Callers should treat this as "no preset selected".
+        return null;
     }
 
     invalidateCache() {
