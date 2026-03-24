@@ -13,7 +13,7 @@ export function run(assert) {
     // loadPreset(preset) sets _preset
     {
         const e = new Evaluator();
-        const preset = { id: 'builtin:demo', name: 'Demo', frame: {} };
+        const preset = { id: 'file:/tmp/demo.milk', name: 'Demo', frame: {} };
         e.loadPreset(preset);
         assert(e._preset === preset, 'loadPreset(preset) sets _preset');
     }

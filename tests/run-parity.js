@@ -17,6 +17,14 @@ const PARITY_TESTS = [
     { name: 'Visual Parity', module: './parity/visual/visual.test.js' },
 ];
 
+function printErrorStack(error, maxLines = 5) {
+    if (!error?.stack)
+        return;
+    const lines = error.stack.split('\n');
+    for (const line of lines.slice(0, maxLines))
+        print(`  ${line}`);
+}
+
 function parseArgs(argv) {
     const opts = {
         verbose: false,
@@ -45,12 +53,7 @@ async function runTest(test) {
         return module.run(mockAssert);
     } catch (error) {
         print(`ERROR: ${test.name}: ${error.message}`);
-        if (error.stack) {
-            const lines = error.stack.split('\n');
-            for (const line of lines.slice(0, 5)) {
-                print(`  ${line}`);
-            }
-        }
+        printErrorStack(error);
         return { passed: 0, failed: 1, error: error.message };
     }
 }
@@ -114,4 +117,18 @@ async function main() {
     }
 }
 
-main();
+// GJS exits before async main() + dynamic import() complete unless a main loop runs.
+const loop = GLib.MainLoop.new(null, false);
+
+main()
+    .then(() => {
+        loop.quit();
+    })
+    .catch(e => {
+        print(`\n${e.message}`);
+        printErrorStack(e);
+        loop.quit();
+        imports.system.exit(1);
+    });
+
+loop.run();

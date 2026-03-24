@@ -85,6 +85,10 @@ function shouldLogError(count) {
     return count === 1 || count % PARSER_ERROR_LOG_INTERVAL === 0;
 }
 
+function gstTupleOrScalar(value, scalarOk) {
+    return Array.isArray(value) ? value : [scalarOk(value), value];
+}
+
 export class AudioEngine {
     constructor({settings = null, logger = console, onFallback = null} = {}) {
         this._settings = settings;
@@ -154,6 +158,21 @@ export class AudioEngine {
         return this._enabled;
     }
 
+    getDiagnostics() {
+        const availability = this._getSourceBackendAvailability();
+        const configuredSource = this._getSetting('string', 'audio-source', 'auto')?.trim?.() || 'auto';
+        return {
+            enabled: this._enabled,
+            configuredSource,
+            activeSource: this._activeSource,
+            autoMode: configuredSource === 'auto',
+            hasRecentSignal: this._hasRecentSignal(),
+            restartAttempts: this._restartAttempts,
+            totalReprobeFailures: this._totalReprobeFailures,
+            backends: availability,
+        };
+    }
+
     getFeatures() {
         const s = Math.max(0.1, this._getSetting('double', 'audio-sensitivity', 1.0));
         const active = this._enabled && this._hasRecentSignal();
@@ -206,6 +225,11 @@ export class AudioEngine {
         const configuredSource = this._getSetting('string', 'audio-source', 'auto');
         const sourceName = configuredSource?.trim?.() || 'auto';
         const candidates = this._buildCandidates(configuredSource);
+        if (this._log.info) {
+            this._log.info(
+                `milkdrop audio source plan configured="${sourceName}" candidates=[${candidates.map(c => c.source).join(', ')}]`
+            );
+        }
 
         if (sourceName === 'auto' && candidates.length === 1 && candidates[0].source === 'stub') {
             this._notify('output-monitor-unavailable', 'Output Monitor Unavailable',
@@ -475,13 +499,13 @@ export class AudioEngine {
         this._busWatchId = clearGSource(this._busWatchId);
         if (this._bus && this._busSignalHandlerId) {
             try { this._bus.disconnect(this._busSignalHandlerId); } catch (e) {
-                this._logger.debug?.(`milkdrop audio bus disconnect error: ${e.message}`);
+                this._log.debug?.(`milkdrop audio bus disconnect error: ${e.message}`);
             }
         }
         this._busSignalHandlerId = 0;
         if (this._bus && this._busSignalWatchEnabled) {
             try { this._bus.remove_signal_watch?.(); } catch (e) {
-                this._logger.debug?.(`milkdrop audio bus remove_signal_watch error: ${e.message}`);
+                this._log.debug?.(`milkdrop audio bus remove_signal_watch error: ${e.message}`);
             }
         }
         this._busSignalWatchEnabled = false;
@@ -527,6 +551,43 @@ export class AudioEngine {
 
     // ── Spectrum processing (hot path) ──────────────────────────
 
+    _summarizeSpectrumBands(bands) {
+        const len = bands.length;
+        const third = Math.max(1, (len / 3) | 0);
+        let eSum = 0;
+        for (let i = 0; i < len; i++)
+            eSum += bands[i];
+        return {
+            len,
+            bass: avgSlice(bands, 0, third),
+            mid: avgSlice(bands, third, third * 2),
+            high: avgSlice(bands, third * 2, len),
+            energy: eSum / len,
+        };
+    }
+
+    _nextBeatValue(linE, linB) {
+        if (this._beatCooldown > 0) {
+            this._beatCooldown -= 1;
+            return 0;
+        }
+        if (this._histCount >= BEAT_WARMUP_FRAMES)
+            return this._detectBeat(linE, linB);
+        return 0;
+    }
+
+    _logFirstSpectrum(structure, len) {
+        this._restartAttempts = 0;
+        this._restartWindowStartUsec = 0;
+        this._totalReprobeFailures = 0;
+        const src = this._activeSource || 'stub';
+        if (this._log.warn)
+            this._log.warn(`milkdrop audio first spectrum source=${src} bands=${len}`);
+        const raw = structure.to_string?.() ?? '';
+        if (this._log.warn)
+            this._log.warn(`milkdrop audio first spectrum raw (300): ${raw.slice(0, 300)}`);
+    }
+
     _onSpectrum(structure) {
         if (!this._enabled)
             return;
@@ -544,29 +605,14 @@ export class AudioEngine {
         if (this._lastUpdateUsec && now - this._lastUpdateUsec >= SIGNAL_TIMEOUT_USEC)
             this._resetBeat();
 
-        const len = bands.length;
-        const third = Math.max(1, (len / 3) | 0);
-        const bass = avgSlice(bands, 0, third);
-        const mid = avgSlice(bands, third, third * 2);
-        const high = avgSlice(bands, third * 2, len);
-
-        // Full-band energy — inline sum avoids a second iteration
-        let eSum = 0;
-        for (let i = 0; i < len; i++)
-            eSum += bands[i];
-        const energy = eSum / len;
+        const {len, bass, mid, high, energy} = this._summarizeSpectrumBands(bands);
 
         // Linear amplitude for beat detection
         const linE = normToLinear(energy);
         const linB = normToLinear(bass);
         this._pushHist(linE, linB);
 
-        let beat = 0;
-        if (this._beatCooldown > 0) {
-            this._beatCooldown -= 1;
-        } else if (this._histCount >= BEAT_WARMUP_FRAMES) {
-            beat = this._detectBeat(linE, linB);
-        }
+        const beat = this._nextBeatValue(linE, linB);
 
         const f = this._features;
         const decay = energy > f.decay * FEATURE_DECAY ? energy : f.decay * FEATURE_DECAY;
@@ -574,17 +620,8 @@ export class AudioEngine {
         this._spectrumCount += 1;
 
         // First spectrum: confirm audio is real, reset budgets
-        if (this._spectrumCount === 1) {
-            this._restartAttempts = 0;
-            this._restartWindowStartUsec = 0;
-            this._totalReprobeFailures = 0;
-            const src = this._activeSource || 'stub';
-            if (this._log.warn)
-                this._log.warn(`milkdrop audio first spectrum source=${src} bands=${len}`);
-            const raw = structure.to_string?.() ?? '';
-            if (this._log.warn)
-                this._log.warn(`milkdrop audio first spectrum raw (300): ${raw.slice(0, 300)}`);
-        }
+        if (this._spectrumCount === 1)
+            this._logFirstSpectrum(structure, len);
 
         // Periodic snapshot
         if (now - this._lastSnapshotUsec >= SNAPSHOT_INTERVAL_USEC) {
@@ -739,10 +776,8 @@ export class AudioEngine {
             const st = caps?.get_structure(0);
             if (!st) return;
 
-            const fmtResult = st.get_string('format');
-            const [okF, fmt] = Array.isArray(fmtResult) ? fmtResult : [fmtResult !== null, fmtResult];
-            const chResult = st.get_int('channels');
-            const [okC, ch] = Array.isArray(chResult) ? chResult : [chResult !== null, chResult];
+            const [okF, fmt] = gstTupleOrScalar(st.get_string('format'), v => v !== null);
+            const [okC, ch] = gstTupleOrScalar(st.get_int('channels'), v => v !== null);
             if (!okF || !okC) return;
 
             const isFloat = fmt === 'F32LE';
@@ -932,7 +967,9 @@ export class AudioEngine {
         // Bit-shift for 2^n, capped to avoid overflow
         const delay = Math.min(MAX_REPROBE_DELAY_MSEC, base * (1 << Math.min(this._totalReprobeFailures, 15)));
         if (this._log.info)
-            this._log.info(`milkdrop audio reprobe in ${delay}ms (failures=${this._totalReprobeFailures})`);
+            this._log.info(
+                `milkdrop audio reprobe in ${delay}ms (failures=${this._totalReprobeFailures} activeSource=${this._activeSource})`
+            );
 
         this._reprobeTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
             this._reprobeTimeoutId = 0;

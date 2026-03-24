@@ -71,6 +71,19 @@ function isExpressionPreset(preset) {
                       typeof preset.pixel_eqs === 'string');
 }
 
+function normalizeFrameAudio(incomingAudio) {
+    return {
+        energy: 0,
+        bass: 0,
+        mid: 0,
+        high: 0,
+        beat: 0,
+        decay: 0,
+        ...incomingAudio,
+        high: incomingAudio.high ?? incomingAudio.treb ?? 0,
+    };
+}
+
 export class Evaluator {
     constructor() {
         this._preset = null;
@@ -120,17 +133,7 @@ export class Evaluator {
 
         const blendProgress = this._getBlendProgress(time);
         const preset = this._preset;
-        const incomingAudio = frameState.audio ?? {};
-        const audio = {
-            energy: 0,
-            bass: 0,
-            mid: 0,
-            high: 0,
-            beat: 0,
-            decay: 0,
-            ...incomingAudio,
-            high: incomingAudio.high ?? incomingAudio.treb ?? 0,
-        };
+        const audio = normalizeFrameAudio(frameState.audio ?? {});
         const monitor = frameState.monitor ?? 0;
         const bassAtt = audio.bass_att ?? (audio.bass * 0.7);
         const midAtt = audio.mid_att ?? (audio.mid * 0.7);
@@ -154,33 +157,7 @@ export class Evaluator {
                 beat: audio.beat,
             });
 
-            // Blend transform properties during preset transitions.
-            // _blendFromExprCtx holds the outgoing preset's last-frame values,
-            // captured in loadPreset().  Without this, switching expression
-            // presets produces an instant jump in zoom/rot/dx/dy/decay.
-            let zoom = ctx.zoom;
-            let rot  = ctx.rot;
-            let dx   = ctx.dx;
-            let dy   = ctx.dy;
-            let decay = ctx.decay;
-            if (blendProgress < 1 && this._blendFromExprCtx) {
-                const prev = this._blendFromExprCtx;
-                const t = this._smoothstep(blendProgress);
-                zoom  = (prev.zoom  ?? ctx.zoom)  + (ctx.zoom  - (prev.zoom  ?? ctx.zoom))  * t;
-                rot   = (prev.rot   ?? ctx.rot)   + (ctx.rot   - (prev.rot   ?? ctx.rot))   * t;
-                dx    = (prev.dx    ?? ctx.dx)    + (ctx.dx    - (prev.dx    ?? ctx.dx))    * t;
-                dy    = (prev.dy    ?? ctx.dy)    + (ctx.dy    - (prev.dy    ?? ctx.dy))    * t;
-                decay = (prev.decay ?? ctx.decay) + (ctx.decay - (prev.decay ?? ctx.decay)) * t;
-
-                // Update context so per-pixel equations also see the blended values
-                ctx.zoom = zoom;
-                ctx.rot = rot;
-                ctx.dx = dx;
-                ctx.dy = dy;
-                ctx.decay = decay;
-            }
-            // Clear frozen blend-from context once the transition is complete.
-            if (blendProgress >= 1) this._blendFromExprCtx = null;
+            const {zoom, rot, dx, dy, decay} = this._blendExprMotion(ctx, blendProgress);
 
             // Capture CURRENT final values (blended if in transition) for the next transition.
             this._prevExprCtx = { zoom, rot, dx, dy, decay };
@@ -250,6 +227,39 @@ export class Evaluator {
         this._exprEval = null;
         this._prevExprCtx = null;
         this._blendFromExprCtx = null;
+    }
+
+    _blendExprMotion(ctx, blendProgress) {
+        // Blend transform properties during preset transitions.
+        // _blendFromExprCtx holds the outgoing preset's last-frame values,
+        // captured in loadPreset().  Without this, switching expression
+        // presets produces an instant jump in zoom/rot/dx/dy/decay.
+        let zoom = ctx.zoom;
+        let rot = ctx.rot;
+        let dx = ctx.dx;
+        let dy = ctx.dy;
+        let decay = ctx.decay;
+        if (blendProgress < 1 && this._blendFromExprCtx) {
+            const prev = this._blendFromExprCtx;
+            const t = this._smoothstep(blendProgress);
+            zoom = (prev.zoom ?? ctx.zoom) + (ctx.zoom - (prev.zoom ?? ctx.zoom)) * t;
+            rot = (prev.rot ?? ctx.rot) + (ctx.rot - (prev.rot ?? ctx.rot)) * t;
+            dx = (prev.dx ?? ctx.dx) + (ctx.dx - (prev.dx ?? ctx.dx)) * t;
+            dy = (prev.dy ?? ctx.dy) + (ctx.dy - (prev.dy ?? ctx.dy)) * t;
+            decay = (prev.decay ?? ctx.decay) + (ctx.decay - (prev.decay ?? ctx.decay)) * t;
+
+            // Update context so per-pixel equations also see the blended values
+            ctx.zoom = zoom;
+            ctx.rot = rot;
+            ctx.dx = dx;
+            ctx.dy = dy;
+            ctx.decay = decay;
+        }
+        // Clear frozen blend-from context once the transition is complete.
+        if (blendProgress >= 1)
+            this._blendFromExprCtx = null;
+
+        return {zoom, rot, dx, dy, decay};
     }
 
     _getBlendProgress(time) {

@@ -112,9 +112,19 @@ async function main() {
     }
 }
 
-main().catch(e => {
-    printerr(e.message);
-    if (e.stack)
-        printerr(e.stack);
-    imports.system.exit(1);
-});
+// GJS exits before async main() + dynamic import() complete unless a main loop runs.
+const loop = GLib.MainLoop.new(null, false);
+
+main()
+    .then(() => {
+        loop.quit();
+    })
+    .catch(e => {
+        printerr(e.message);
+        if (e.stack)
+            printerr(e.stack);
+        loop.quit();
+        imports.system.exit(1);
+    });
+
+loop.run();

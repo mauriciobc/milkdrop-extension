@@ -69,7 +69,7 @@ export async function run(assert) {
     {
         let threw = false;
         try {
-            await store.loadPreset('builtin:missing-id');
+            await store.loadPreset('file:/missing-id.milk');
         } catch (_error) {
             threw = true;
         }

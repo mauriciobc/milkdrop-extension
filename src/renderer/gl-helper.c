@@ -818,6 +818,81 @@ shutdown_helper(HelperState *state)
 
 /* ── Main loop ─────────────────────────────────────────────────────── */
 
+typedef enum {
+    MSG_LOOP_CONTINUE,
+    MSG_LOOP_BREAK,
+} MessageLoopResult;
+
+static MessageLoopResult
+dispatch_stdin_message(JsonObject *obj, HelperState *state)
+{
+    if (message_has_type(obj, "shutdown")) {
+        json_object_unref(obj);
+        return MSG_LOOP_BREAK;
+    }
+
+    if (message_has_type(obj, "init")) {
+        int w = get_int(obj, "width", 320);
+        int h = get_int(obj, "height", 180);
+        gchar *tex_path = get_string_dup(obj, "texturePath");
+        json_object_unref(obj);
+        if (tex_path) {
+            g_free(state->texture_search_path);
+            state->texture_search_path = tex_path;
+        }
+        if (!initialize_egl(state, w, h))
+            return MSG_LOOP_BREAK;
+        return MSG_LOOP_CONTINUE;
+    }
+
+    if (message_has_type(obj, "resize")) {
+        int w = get_int(obj, "width", state->width);
+        int h = get_int(obj, "height", state->height);
+        json_object_unref(obj);
+        if (state->initialized && (w != state->width || h != state->height))
+            resize_buffers(state, w, h);
+        return MSG_LOOP_CONTINUE;
+    }
+
+    if (message_has_type(obj, "preset-change")) {
+        gchar *path = get_string_dup(obj, "path");
+        json_object_unref(obj);
+        if (path) {
+            g_free(state->current_preset_path);
+            state->current_preset_path = path;
+            if (state->projectm)
+                projectm_load_preset_file(state->projectm, path, false);
+        }
+        return MSG_LOOP_CONTINUE;
+    }
+
+    /* Backward-compat: ignore compile-default / compile-shaders / mesh */
+    if (message_has_type(obj, "compile-default") ||
+        message_has_type(obj, "compile-shaders") ||
+        message_has_type(obj, "mesh")) {
+        json_object_unref(obj);
+        return MSG_LOOP_CONTINUE;
+    }
+
+    if (message_has_type(obj, "frame")) {
+        double time_value = get_double(obj, "time", 0.0);
+        gchar *preset_path = get_string_dup(obj, "presetPath");
+        GLfloat pcm_left[PCM_SAMPLE_COUNT];
+        GLfloat pcm_right[PCM_SAMPLE_COUNT];
+        int pl = parse_pcm_data(obj, "pcmLeft", pcm_left);
+        int pr = parse_pcm_data(obj, "pcmRight", pcm_right);
+        int pcm_count = pl >= pr ? pl : pr;
+        json_object_unref(obj);
+        render_frame(state, time_value, pcm_left, pcm_right, pcm_count,
+                     preset_path ? preset_path : state->current_preset_path);
+        g_free(preset_path);
+        return MSG_LOOP_CONTINUE;
+    }
+
+    json_object_unref(obj);
+    return MSG_LOOP_CONTINUE;
+}
+
 static void
 parse_argv(int argc, char **argv, HelperState *state)
 {
@@ -862,71 +937,8 @@ main(int argc, char **argv)
         JsonObject *obj = parse_message_line(line);
         if (!obj)
             continue;
-
-        if (message_has_type(obj, "shutdown")) {
-            json_object_unref(obj);
+        if (dispatch_stdin_message(obj, &state) == MSG_LOOP_BREAK)
             break;
-        }
-
-        if (message_has_type(obj, "init")) {
-            int w = get_int(obj, "width", 320);
-            int h = get_int(obj, "height", 180);
-            gchar *tex_path = get_string_dup(obj, "texturePath");
-            json_object_unref(obj);
-            if (tex_path) {
-                g_free(state.texture_search_path);
-                state.texture_search_path = tex_path;
-            }
-            if (!initialize_egl(&state, w, h))
-                break;
-            continue;
-        }
-
-        if (message_has_type(obj, "resize")) {
-            int w = get_int(obj, "width", state.width);
-            int h = get_int(obj, "height", state.height);
-            json_object_unref(obj);
-            if (state.initialized && (w != state.width || h != state.height))
-                resize_buffers(&state, w, h);
-            continue;
-        }
-
-        if (message_has_type(obj, "preset-change")) {
-            gchar *path = get_string_dup(obj, "path");
-            json_object_unref(obj);
-            if (path) {
-                g_free(state.current_preset_path);
-                state.current_preset_path = path;
-                if (state.projectm)
-                    projectm_load_preset_file(state.projectm, path, false);
-            }
-            continue;
-        }
-
-        /* Backward-compat: ignore compile-default / compile-shaders / mesh */
-        if (message_has_type(obj, "compile-default") ||
-            message_has_type(obj, "compile-shaders") ||
-            message_has_type(obj, "mesh")) {
-            json_object_unref(obj);
-            continue;
-        }
-
-        if (message_has_type(obj, "frame")) {
-            double time_value = get_double(obj, "time", 0.0);
-            gchar *preset_path = get_string_dup(obj, "presetPath");
-            GLfloat pcm_left[PCM_SAMPLE_COUNT];
-            GLfloat pcm_right[PCM_SAMPLE_COUNT];
-            int pl = parse_pcm_data(obj, "pcmLeft", pcm_left);
-            int pr = parse_pcm_data(obj, "pcmRight", pcm_right);
-            int pcm_count = pl >= pr ? pl : pr;
-            json_object_unref(obj);
-            render_frame(&state, time_value, pcm_left, pcm_right, pcm_count,
-                         preset_path ? preset_path : state.current_preset_path);
-            g_free(preset_path);
-            continue;
-        }
-
-        json_object_unref(obj);
     }
     free(line);
 

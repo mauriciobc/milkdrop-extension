@@ -2,7 +2,7 @@
 
 gnome-milkdrop is a GNOME Shell extension plus a companion renderer process for MilkDrop-style desktop visualizations.
 
-The project targets GNOME Shell 47, 48, and 49 on Wayland. It uses a split-process architecture: the shell extension handles lifecycle and orchestration, while a standalone GTK4 renderer process owns OpenGL work.
+The project targets GNOME Shell 47, 48, and 49 on Wayland. It uses a split-process architecture: the shell extension handles lifecycle and orchestration, a standalone GTK4 renderer process owns OpenGL scheduling, and a native helper executes the GL workload.
 
 ## Current State (March 2026)
 
@@ -10,9 +10,11 @@ Implemented and working:
 
 - Shell-side extension lifecycle, monitor ownership, preferences, and settings schema
 - Standalone GTK4 renderer process with GL bridge and native helper path
-- Unix socket IPC with newline-delimited JSON protocol
-- Reliable async write queues for shell/renderer IPC streams
-- Audio capture pipeline (monitor-first policy) with hardened restart behavior
+- Unix socket IPC with newline-delimited JSON; **versioned handshake** (`protocolVersion` on `ready` and control messages) and bounded async write queues with drop accounting
+- **Per-frame audio snapshots** without JSON deep-clone on the hot path (`frame-state.js`), feeding evaluation and IPC
+- Audio capture pipeline (monitor-first policy) with hardened restart/reprobe behavior; **runtime diagnostics** exposed on D-Bus (see below)
+- **D-Bus status** on the session bus: `io.github.mauriciobc.Milkdrop` — `GetWindowStatus()` returns window/overlay flags plus audio pipeline fields (enabled, configured vs active source, signal presence, restart/reprobe counters)
+- Presets: **file-based** catalog and rotation; a small **bootstrap** fallback preset when nothing else is available (no bundled built-in preset library)
 - Dual evaluator path:
 	- Legacy WaveSpec preset evaluation
 	- Expression preset evaluation
@@ -28,21 +30,21 @@ Implemented and working:
 	- PBO asynchronous readback
 	- persistent SHM double buffering
 
-Current unit/integration test status:
+Tests:
 
-- 702 passed, 0 failed via gjs -m tests/run.js
+- Run from the repo root: `gjs -m tests/run.js` (unit/integration assertions)
+- Parity and golden checks: `gjs -m tests/run-parity.js`
+- Benchmarks: `gjs -m tests/bench/run.js` (see [CLAUDE.md](CLAUDE.md) for JSON mode)
 
 ## Architecture
 
-Two cooperating processes:
+Three cooperating pieces:
 
-1. GNOME Shell extension process
-- Owns lifecycle, monitor orchestration, renderer launch/restart, audio capture, preset loading, and per-frame evaluation.
+1. **GNOME Shell extension** — lifecycle, monitor orchestration, renderer launch/restart, audio capture, preset loading/indexing, per-frame evaluation, socket IPC server, D-Bus status.
+2. **Renderer process (GTK4)** — GtkGLArea loop, IPC client, bridge to the native helper with backpressure handling.
+3. **Native GL helper** — shader setup, draw/warp/composite passes, optional SHM transfer.
 
-2. Renderer process (GTK4)
-- Owns GL area, mesh updates, shader pipeline, frame ingestion, and final rendering.
-
-This separation keeps shell stability high and isolates GL crashes from GNOME Shell.
+This separation keeps shell stability high and isolates GL crashes from GNOME Shell. More detail: [docs/architecture.md](docs/architecture.md).
 
 ## Build And Run
 
@@ -79,17 +81,23 @@ Helper scripts:
 - src/extension: shell extension logic (audio, evaluator, IPC, presets, prefs)
 - src/extension/expr: expression engine modules
 - src/renderer: GTK4 renderer, GL bridge/client, mesh and vertex evaluation
+- src/shared: code shared between extension and renderer (e.g. IPC protocol version)
 - tests: unit and benchmark suites
-- docs: architecture and implementation notes
+- docs: architecture and notes ([architecture](docs/architecture.md), [comparison with related GNOME extensions](docs/extension-benchmark.md), [Hanabi alignment](docs/hanabi-learnings.md), [third-party reference snapshots](docs/reference-codebases/README.md), [v2 architecture spikes](docs/v2-architecture-spikes.md))
 
 ## Roadmap (Next)
 
-Near-term remaining work includes:
+Near-term technical work includes:
 
 1. Motion vectors expression module and tests
 2. Full renderer drawing integration for custom shapes and custom waves
 3. End-to-end expression preset parity checks against reference behavior
 4. Additional visual compliance and performance tuning passes
+
+Exploratory (see [docs/v2-architecture-spikes.md](docs/v2-architecture-spikes.md)):
+
+- Spike A: optional complementary D-Bus control surface for non-hot-path commands and richer telemetry
+- Spike B: optional external analysis mode (e.g. `cava`) behind a flag for difficult environments
 
 ## Project Metadata
 

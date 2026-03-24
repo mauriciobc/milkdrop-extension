@@ -4,7 +4,11 @@
  *
  * Each test module exports run(assert), where assert(condition, message)
  * records a failure when condition is false and continues execution.
+ *
+ * GJS exits when the main script returns unless a GLib main loop is running;
+ * async main() + dynamic import() otherwise never completes (no summary line).
  */
+import GLib from 'gi://GLib';
 
 let failed = 0;
 let passed = 0;
@@ -71,7 +75,16 @@ async function main() {
         throw new Error(`${failed} test(s) failed`);
 }
 
-main().catch(e => {
-    console.error(e);
-    throw e;
-});
+const loop = GLib.MainLoop.new(null, false);
+
+main()
+    .then(() => {
+        loop.quit();
+    })
+    .catch(e => {
+        console.error(e);
+        loop.quit();
+        imports.system.exit(1);
+    });
+
+loop.run();

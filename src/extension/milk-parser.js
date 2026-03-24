@@ -4,6 +4,10 @@
  * Shared by parity tests and parser benchmark (projectM PresetFileParser parity).
  */
 
+function isSkippablePresetLine(trimmed) {
+    return !trimmed || trimmed.startsWith('//') || trimmed.startsWith('#');
+}
+
 export function parsePresetValues(content) {
     const values = {};
     const lines = content.split('\n');
@@ -22,7 +26,7 @@ export function parsePresetValues(content) {
             continue;
         }
 
-        if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('#')) continue;
+        if (isSkippablePresetLine(trimmed)) continue;
 
         const eqIdx = trimmed.indexOf('=');
         if (eqIdx === -1) {

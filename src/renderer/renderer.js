@@ -510,7 +510,7 @@ function runBenchmark(options) {
                 dx: 0.01 * Math.sin(t * 0.3),
                 dy: 0.01 * Math.cos(t * 0.2),
                 decay: 0.97,
-                presetId: 'builtin:demo-wave',
+                presetId: 'bootstrap:demo-wave',
                 presetName: 'Demo Wave',
                 blendProgress: 1,
                 audio: {energy: 0.45, bass: 0.52, mid: 0.38, high: 0.22, beat: 0, decay: 0.44},

@@ -14,8 +14,8 @@ const FRAME_MESSAGE = {
     dx: 0.003,
     dy: -0.002,
     decay: 0.98,
-    presetId: 'builtin:demo-wave',
-    presetName: 'Demo Wave',
+    presetId: 'file:/tmp/presets/demo-wave.milk',
+    presetName: 'Demo Wave File',
     blendProgress: 1.0,
     audio: {
         source: 'pulse',
@@ -33,10 +33,10 @@ const FRAME_MESSAGE = {
 
 const PRESET_LOAD_MESSAGE = {
     type: 'preset-load',
-    presetId: 'builtin:hypnotic-tunnel',
+    presetId: 'file:/tmp/presets/hypnotic-tunnel.milk',
     preset: {
-        id: 'builtin:hypnotic-tunnel',
-        name: 'Hypnotic Tunnel',
+        id: 'file:/tmp/presets/hypnotic-tunnel.milk',
+        name: 'Hypnotic Tunnel File',
         frame: {
             zoom: {base: 1.03, amplitude: 0.016, frequency: 0.3, waveform: 'sin', audioScale: 0.07},
             rot: {base: 0.008, amplitude: 0.02, frequency: 0.22, waveform: 'sin', audioScale: 0.04},

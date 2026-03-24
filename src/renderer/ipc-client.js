@@ -1,11 +1,20 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import {IPC_PROTOCOL_VERSION, isSupportedProtocolVersion, normalizeProtocolVersion} from '../shared/ipc-protocol.js';
 
 const encoder = new TextEncoder();
 const RECONNECT_DELAY_MS = 500;
 
 function _debugIpc() {
     return GLib.getenv('MILKDROP_DEBUG_IPC') === '1';
+}
+
+function clearClientGSource(self, fieldName) {
+    const id = self[fieldName];
+    if (!id)
+        return;
+    GLib.source_remove(id);
+    self[fieldName] = 0;
 }
 
 export class IpcClient {
@@ -30,6 +39,8 @@ export class IpcClient {
         this._firstLineReceived = false;
         this._frameReceiveCount = 0;
         this._heartbeatId = 0;
+        this._queueDropCount = 0;
+        this._serverProtocolVersion = 1;
     }
 
     static HEARTBEAT_TIMEOUT_MS = 15000;
@@ -75,7 +86,10 @@ export class IpcClient {
                     this._firstLineReceived = false;
                     if (_debugIpc())
                         this._logger.info?.(`milkdrop [renderer] IPC connected socket=${this._socketPath}`);
-                    this.send({type: 'ready'});
+                    this.send({
+                        type: 'ready',
+                        protocolVersion: IPC_PROTOCOL_VERSION,
+                    });
                     this._readLoop();
                 } catch (error) {
                     if (!error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {
@@ -99,10 +113,7 @@ export class IpcClient {
     }
 
     _clearHeartbeat() {
-        if (this._heartbeatId) {
-            GLib.source_remove(this._heartbeatId);
-            this._heartbeatId = 0;
-        }
+        clearClientGSource(this, '_heartbeatId');
     }
 
     _resetHeartbeat() {
@@ -134,10 +145,7 @@ export class IpcClient {
         this._connectPending = false;
         this._writeQueue = [];
         this._writePending = false;
-        if (this._reconnectSourceId) {
-            GLib.source_remove(this._reconnectSourceId);
-            this._reconnectSourceId = 0;
-        }
+        clearClientGSource(this, '_reconnectSourceId');
         this._cancellable?.cancel();
         this._clearHeartbeat();
         this._closeConnection();
@@ -152,8 +160,9 @@ export class IpcClient {
 
         this._writeQueue.push(`${JSON.stringify(message)}\n`);
         while (this._writeQueue.length > IpcClient.MAX_QUEUE_LENGTH) {
+            this._queueDropCount += 1;
             if (_debugIpc())
-                this._logger.info?.('milkdrop [renderer] IPC queue eviction');
+                this._logger.info?.(`milkdrop [renderer] IPC queue eviction totalDrops=${this._queueDropCount}`);
             this._writeQueue.shift();
         }
         this._flushWriteQueue();
@@ -257,8 +266,16 @@ export class IpcClient {
 
         if (!this._firstLineReceived) {
             this._firstLineReceived = true;
+            this._serverProtocolVersion = normalizeProtocolVersion(message);
+            if (!isSupportedProtocolVersion(this._serverProtocolVersion)) {
+                this._logger.warn?.(
+                    `milkdrop [renderer] unsupported server protocol version=${this._serverProtocolVersion}; supported=1..${IPC_PROTOCOL_VERSION}`
+                );
+            }
             if (_debugIpc())
-                this._logger.info?.(`milkdrop [renderer] first IPC line received type=${message?.type ?? '?'}`);
+                this._logger.info?.(
+                    `milkdrop [renderer] first IPC line received type=${message?.type ?? '?'} protocolVersion=${this._serverProtocolVersion}`
+                );
         }
 
         if (message.type === 'frame') {

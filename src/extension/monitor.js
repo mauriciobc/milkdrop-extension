@@ -10,6 +10,7 @@ import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
 
 import {AudioEngine} from './audio.js';
 import {Evaluator} from './evaluator.js';
+import {attachAudioSnapshot, attachPresetPathForHelper, snapshotAudioForFrame} from './frame-state.js';
 import {IpcServer} from './ipc.js';
 import {MprisWatcher} from './mpris-watcher.js';
 import {perfBegin, perfEnd} from './perf.js';
@@ -63,6 +64,14 @@ function _isDisposed(obj) {
 // ManagedRendererWindow instances while any _refresh() is executing.
 // This breaks the unmanaged→remap→new-MRW→idle→_refresh→... recursion.
 let _windowRefreshActive = false;
+
+function _clearGlibSource(self, fieldName) {
+    const id = self[fieldName];
+    if (!id)
+        return;
+    GLib.source_remove(id);
+    self[fieldName] = 0;
+}
 
 function notifyUser(title, body, logger) {
     try {
@@ -131,10 +140,7 @@ class ManagedRendererWindow {
     }
 
     disconnect() {
-        if (this._refreshSourceId) {
-            GLib.source_remove(this._refreshSourceId);
-            this._refreshSourceId = 0;
-        }
+        _clearGlibSource(this, '_refreshSourceId');
 
         if (this._window) {
             for (const signalId of this._signals) {
@@ -370,10 +376,7 @@ class RendererProcess {
         }
 
         this.subprocess?.wait_async(this._cancellable, (process, result) => {
-            if (this._killTimeoutId) {
-                GLib.source_remove(this._killTimeoutId);
-                this._killTimeoutId = 0;
-            }
+            _clearGlibSource(this, '_killTimeoutId');
             if (!this._running && !this._stopping)
                 return;
 
@@ -419,10 +422,7 @@ class RendererProcess {
         this._ipc.disable();
         this._cancellable.cancel();
 
-        if (this._stopIdleId) {
-            GLib.source_remove(this._stopIdleId);
-            this._stopIdleId = 0;
-        }
+        _clearGlibSource(this, '_stopIdleId');
 
         // Capture refs for deferred cleanup — I/O calls are blocked during GC.
         const process = this.subprocess;
@@ -835,20 +835,9 @@ export class MonitorManager {
         this._paused = false;
         this._audioEngine.disable();
 
-        if (this._stopAfterFadeId) {
-            GLib.source_remove(this._stopAfterFadeId);
-            this._stopAfterFadeId = 0;
-        }
-
-        if (this._enableIdleId) {
-            GLib.source_remove(this._enableIdleId);
-            this._enableIdleId = 0;
-        }
-
-        if (this._spawnRetryId) {
-            GLib.source_remove(this._spawnRetryId);
-            this._spawnRetryId = 0;
-        }
+        _clearGlibSource(this, '_stopAfterFadeId');
+        _clearGlibSource(this, '_enableIdleId');
+        _clearGlibSource(this, '_spawnRetryId');
 
         for (const {owner, id} of this._monitorSignals)
             owner.disconnect(id);
@@ -868,20 +857,9 @@ export class MonitorManager {
             this._settings.disconnect(id);
         this._settingsSignals = [];
 
-        if (this._restartTimeoutId) {
-            GLib.source_remove(this._restartTimeoutId);
-            this._restartTimeoutId = 0;
-        }
-
-        if (this._frameSourceId) {
-            GLib.source_remove(this._frameSourceId);
-            this._frameSourceId = 0;
-        }
-
-        if (this._presetRotationId) {
-            GLib.source_remove(this._presetRotationId);
-            this._presetRotationId = 0;
-        }
+        _clearGlibSource(this, '_restartTimeoutId');
+        _clearGlibSource(this, '_frameSourceId');
+        _clearGlibSource(this, '_presetRotationId');
 
         this._unexportDbusStatus();
         this._mprisWatcher?.disable();
@@ -920,8 +898,7 @@ export class MonitorManager {
         if (!this._enabled || this._disabling)
             return;
 
-        if (this._restartTimeoutId)
-            GLib.source_remove(this._restartTimeoutId);
+        _clearGlibSource(this, '_restartTimeoutId');
 
         this._logger.warn?.(`milkdrop scheduling renderer restart: ${reason}`);
         this._restartTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, HOTPLUG_RESTART_DEBOUNCE_MS, () => {
@@ -950,8 +927,7 @@ export class MonitorManager {
         this._logger.warn?.(`[GNOME Milkdrop] _spawnForCurrentMonitors: ${monitors.length} monitor(s), enabledMonitors size=${enabledMonitors.size}`);
 
         if (monitors.length === 0) {
-            if (this._spawnRetryId)
-                GLib.source_remove(this._spawnRetryId);
+            _clearGlibSource(this, '_spawnRetryId');
             this._spawnRetryId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
                 this._spawnRetryId = 0;
                 if (!this._enabled || this._disabling)
@@ -996,8 +972,7 @@ export class MonitorManager {
     }
 
     _startFramePump() {
-        if (this._frameSourceId)
-            GLib.source_remove(this._frameSourceId);
+        _clearGlibSource(this, '_frameSourceId');
 
         const fpsLimit = Math.max(1, this._getIntSetting('fps-limit', 60));
         const intervalMs = Math.max(16, Math.round(1000 / fpsLimit));
@@ -1057,10 +1032,49 @@ export class MonitorManager {
     }
 
     _cancelProbeTimers() {
-        if (this._probeTimeoutId) {
-            GLib.source_remove(this._probeTimeoutId);
-            this._probeTimeoutId = 0;
+        _clearGlibSource(this, '_probeTimeoutId');
+    }
+
+    _abortProbeAfterEvaluatorRejected(preset) {
+        // Treat evaluator rejection as "bad preset" for session-only
+        // quarantine. Otherwise sequential rotation can keep selecting
+        // the same candidate and never progress.
+        const debugId = String(preset.id);
+        this._evaluatorRejectedPresetIds.add(debugId);
+        this._lastRejectedPresetId = debugId;
+        if (!this._quarantineDebugLoggedIds.has(debugId)) {
+            this._logger.warn?.(`milkdrop quarantine debug marker: evaluator-rejected presetId=${debugId}`);
+            this._quarantineDebugLoggedIds.add(debugId);
         }
+
+        try {
+            this._crashQuarantine.recordCrash(preset.id);
+            const nowBlacklisted = this._crashQuarantine.isBlacklisted(preset.id);
+            if (!nowBlacklisted)
+                this._logger.warn?.(`milkdrop quarantine debug: evaluator-rejected presetId=${debugId} isBlacklisted=false`);
+        } catch (_e) {}
+
+        this._cancelProbeTimers();
+        this._probeActive = false;
+        this._probePreset = null;
+        this._probePresetId = null;
+        this._probeCrashed = false;
+        this._probeFrameTarget = 0;
+
+        if (this._lastStablePreset)
+            this._applyPreset(this._lastStablePreset, 'probe-eval-failed');
+        else {
+            this._currentPreset = null;
+            this._evaluator.loadPreset(null);
+        }
+
+        this._logger.warn?.(`milkdrop probe ended early: evaluator rejected presetId=${preset.id}`);
+
+        // Important for rotation progress:
+        // - helper/evaluator should remain on the last stable preset,
+        // - but preset selection should move past the rejected candidate.
+        this._currentPreset = preset;
+        this._helperPresetEnabled = false;
     }
 
     _beginProbe(preset, reason = 'probe') {
@@ -1109,45 +1123,7 @@ export class MonitorManager {
         // If the evaluator rejected the preset, the helper won't load it
         // (no `presetPath`). In that case, end the probe without committing.
         if (!this._helperPresetEnabled) {
-            // Treat evaluator rejection as "bad preset" for session-only
-            // quarantine. Otherwise sequential rotation can keep selecting
-            // the same candidate and never progress.
-            const debugId = String(preset.id);
-            this._evaluatorRejectedPresetIds.add(debugId);
-            this._lastRejectedPresetId = debugId;
-            if (!this._quarantineDebugLoggedIds.has(debugId)) {
-                this._logger.warn?.(`milkdrop quarantine debug marker: evaluator-rejected presetId=${debugId}`);
-                this._quarantineDebugLoggedIds.add(debugId);
-            }
-
-            try {
-                this._crashQuarantine.recordCrash(preset.id);
-                const nowBlacklisted = this._crashQuarantine.isBlacklisted(preset.id);
-                if (!nowBlacklisted)
-                    this._logger.warn?.(`milkdrop quarantine debug: evaluator-rejected presetId=${debugId} isBlacklisted=false`);
-            } catch (_e) {}
-
-            this._cancelProbeTimers();
-            this._probeActive = false;
-            this._probePreset = null;
-            this._probePresetId = null;
-            this._probeCrashed = false;
-            this._probeFrameTarget = 0;
-
-            if (this._lastStablePreset)
-                this._applyPreset(this._lastStablePreset, 'probe-eval-failed');
-            else {
-                this._currentPreset = null;
-                this._evaluator.loadPreset(null);
-            }
-
-            this._logger.warn?.(`milkdrop probe ended early: evaluator rejected presetId=${preset.id}`);
-
-            // Important for rotation progress:
-            // - helper/evaluator should remain on the last stable preset,
-            // - but preset selection should move past the rejected candidate.
-            this._currentPreset = preset;
-            this._helperPresetEnabled = false;
+            this._abortProbeAfterEvaluatorRejected(preset);
             return false;
         }
         return true;
@@ -1264,10 +1240,7 @@ export class MonitorManager {
     }
 
     _startPresetRotation() {
-        if (this._presetRotationId) {
-            GLib.source_remove(this._presetRotationId);
-            this._presetRotationId = 0;
-        }
+        _clearGlibSource(this, '_presetRotationId');
 
         // Avoid timer churn when there aren't enough eligible presets.
         if ((this._presetEligibleFileCount ?? 0) < 2)
@@ -1482,10 +1455,8 @@ export class MonitorManager {
             return;
         this._lastOverlayVisible = visible;
 
-        if (visible && this._stopAfterFadeId) {
-            GLib.source_remove(this._stopAfterFadeId);
-            this._stopAfterFadeId = 0;
-        }
+        if (visible)
+            _clearGlibSource(this, '_stopAfterFadeId');
 
         const targetOpacity = visible ? 255 : 0;
         const duration = MEDIA_OVERLAY_FADE_MS;
@@ -1516,8 +1487,7 @@ export class MonitorManager {
         this._gnomeShellOverride?.setMediaOverlayVisibility?.(visible);
 
         if (!visible && showOnlyWhenMedia && this._rendererProcesses.size > 0) {
-            if (this._stopAfterFadeId)
-                GLib.source_remove(this._stopAfterFadeId);
+            _clearGlibSource(this, '_stopAfterFadeId');
             this._stopAfterFadeId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, duration, () => {
                 this._stopAfterFadeId = 0;
                 if (!this._enabled || this._disabling)
@@ -1539,6 +1509,7 @@ export class MonitorManager {
         const showOnlyWhenMedia = this._getBooleanSetting('show-only-when-media-playing', false);
         const hasActivePlayback = !!this._mprisWatcher?.hasActivePlayback;
         const overlayVisible = !showOnlyWhenMedia || hasActivePlayback;
+        const audioDiagnostics = this._audioEngine.getDiagnostics?.() ?? {};
         const titles = [];
         for (const [metaWindow] of this._managedWindows) {
             try {
@@ -1555,6 +1526,12 @@ export class MonitorManager {
             HasActivePlayback: GLib.Variant.new_boolean(hasActivePlayback),
             RendererCount: GLib.Variant.new_uint32(this._rendererProcesses.size),
             PresetCount: GLib.Variant.new_uint32(this._presetFileCount ?? 0),
+            AudioEnabled: GLib.Variant.new_boolean(Boolean(audioDiagnostics.enabled)),
+            AudioConfiguredSource: GLib.Variant.new_string(String(audioDiagnostics.configuredSource ?? 'auto')),
+            AudioActiveSource: GLib.Variant.new_string(String(audioDiagnostics.activeSource ?? 'stub')),
+            AudioHasRecentSignal: GLib.Variant.new_boolean(Boolean(audioDiagnostics.hasRecentSignal)),
+            AudioRestartAttempts: GLib.Variant.new_int32(Number(audioDiagnostics.restartAttempts ?? 0)),
+            AudioReprobeFailures: GLib.Variant.new_int32(Number(audioDiagnostics.totalReprobeFailures ?? 0)),
             WindowTitles: GLib.Variant.new_strv(titles),
         };
         return new GLib.Variant('a{sv}', status);
@@ -1592,6 +1569,27 @@ export class MonitorManager {
         }
     }
 
+    _readTypedSetting(key, fallback, readFn) {
+        if (!this._settings || !this._hasSettingKey(key))
+            return fallback;
+        try {
+            return readFn(this._settings, key);
+        } catch (_error) {
+            return fallback;
+        }
+    }
+
+    _maybeRotateOnBeat(evaluated) {
+        if (this._probeActive || !this._getBooleanSetting('beat-cuts-enabled', false) || !evaluated.audio?.beat)
+            return;
+        const now = GLib.get_monotonic_time() / 1000000;
+        const cooldown = Math.max(0, this._getDoubleSetting('beat-cut-cooldown-sec', DEFAULT_BEAT_CUT_COOLDOWN_SEC));
+        if (now - this._lastBeatCutTime > cooldown) {
+            this._lastBeatCutTime = now;
+            this._rotatePreset();
+        }
+    }
+
     _buildFrameState(monitorIndex, fpsLimit) {
         const baseFrameState = {
             type: 'frame',
@@ -1602,7 +1600,7 @@ export class MonitorManager {
             audio: this._audioEngine.getFeatures(),
         };
 
-        const audioClone = JSON.parse(JSON.stringify(baseFrameState.audio));
+        const audioSnapshot = snapshotAudioForFrame(baseFrameState.audio);
         const evalToken = perfBegin('evaluator');
         const evaluated = this._evaluator.evaluateFrame(baseFrameState);
         const evalEndUs = GLib.get_monotonic_time();
@@ -1610,38 +1608,15 @@ export class MonitorManager {
         if (_debugHang() && evalToken && (evalEndUs - evalToken.start) > SLOW_FRAME_THRESHOLD_US)
             this._logger.warn?.(`milkdrop [extension] slow evaluator: ${((evalEndUs - evalToken.start) / 1000).toFixed(1)}ms (may block main loop)`);
 
-        const raw = audioClone;
-        evaluated.audio = {
-            source: String(raw?.source ?? 'stub'),
-            active: Boolean(raw?.active),
-            energy: Number(raw?.energy ?? 0),
-            bass: Number(raw?.bass ?? 0),
-            mid: Number(raw?.mid ?? 0),
-            high: Number(raw?.high ?? 0),
-            beat: Number(raw?.beat ?? 0),
-            decay: Number(raw?.decay ?? 0),
-            pcmLeft: raw?.active ? (raw?.pcmLeft || []) : [],
-            pcmRight: raw?.active ? (raw?.pcmRight || []) : [],
-        };
+        attachAudioSnapshot(evaluated, audioSnapshot);
 
         // Preset path for projectM backend.
-        if (this._helperPresetEnabled && this._currentPreset?.source === 'file' && this._currentPreset?.id?.startsWith?.('file:')) {
-            evaluated.presetPath = this._currentPreset.id.replace(/^file:/, '');
-        } else {
-            evaluated.presetPath = undefined;
-        }
+        attachPresetPathForHelper(evaluated, this._helperPresetEnabled, this._currentPreset);
 
         // Beat-cut: trigger immediate preset rotation on beat if enabled.
         // Gated on !_probeActive to avoid interrupting an ongoing probe/commit sequence.
         // Cooldown is configurable for beat-cut behavior.
-        if (!this._probeActive && this._getBooleanSetting('beat-cuts-enabled', false) && evaluated.audio?.beat) {
-            const now = GLib.get_monotonic_time() / 1000000;
-            const cooldown = Math.max(0, this._getDoubleSetting('beat-cut-cooldown-sec', DEFAULT_BEAT_CUT_COOLDOWN_SEC));
-            if (now - this._lastBeatCutTime > cooldown) {
-                this._lastBeatCutTime = now;
-                this._rotatePreset();
-            }
-        }
+        this._maybeRotateOnBeat(evaluated);
 
         return evaluated;
     }
@@ -1772,58 +1747,24 @@ export class MonitorManager {
     }
 
     _getBooleanSetting(key, fallback) {
-        if (!this._settings || !this._hasSettingKey(key))
-            return fallback;
-
-        try {
-            return this._settings.get_boolean(key);
-        } catch (_error) {
-            return fallback;
-        }
+        return this._readTypedSetting(key, fallback, (s, k) => s.get_boolean(k));
     }
 
     _getIntSetting(key, fallback) {
-        if (!this._settings || !this._hasSettingKey(key))
-            return fallback;
-
-        try {
-            return this._settings.get_int(key);
-        } catch (_error) {
-            return fallback;
-        }
+        return this._readTypedSetting(key, fallback, (s, k) => s.get_int(k));
     }
 
     _getDoubleSetting(key, fallback) {
-        if (!this._settings || !this._hasSettingKey(key))
-            return fallback;
-
-        try {
-            return this._settings.get_double(key);
-        } catch (_error) {
-            return fallback;
-        }
+        return this._readTypedSetting(key, fallback, (s, k) => s.get_double(k));
     }
 
     _getStringSetting(key, fallback) {
-        if (!this._settings || !this._hasSettingKey(key))
-            return fallback;
-
-        try {
-            return this._settings.get_string(key);
-        } catch (_error) {
-            return fallback;
-        }
+        return this._readTypedSetting(key, fallback, (s, k) => s.get_string(k));
     }
 
     _getStrvSetting(key, fallback = []) {
-        if (!this._settings || !this._hasSettingKey(key))
-            return Array.isArray(fallback) ? fallback : [];
-
-        try {
-            return this._settings.get_strv(key) ?? fallback;
-        } catch (_error) {
-            return Array.isArray(fallback) ? fallback : [];
-        }
+        const fb = Array.isArray(fallback) ? fallback : [];
+        return this._readTypedSetting(key, fb, (s, k) => s.get_strv(k) ?? fallback);
     }
 
     _hasSettingKey(key) {

@@ -1,5 +1,6 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import {IPC_PROTOCOL_VERSION, isSupportedProtocolVersion, normalizeProtocolVersion} from '../shared/ipc-protocol.js';
 
 const encoder = new TextEncoder();
 
@@ -34,6 +35,8 @@ export class IpcServer {
         this._serviceSignalId = 0;
         this._frameWriteCount = 0;
         this._sendDropLogged = false;
+        this._queueDropCount = 0;
+        this._clientProtocolVersion = 1;
     }
 
     static MAX_QUEUE_LENGTH = 5;
@@ -131,14 +134,16 @@ export class IpcServer {
             return false;
         }
 
-        const payload = `${JSON.stringify(message)}\n`;
+        const wireMessage = this._toWireMessage(message);
+        const payload = `${JSON.stringify(wireMessage)}\n`;
         if (message?.type === 'frame') {
             this._pendingFrame = payload;
         } else {
             this._writeQueue.push(payload);
             while (this._writeQueue.length > IpcServer.MAX_QUEUE_LENGTH) {
+                this._queueDropCount += 1;
                 if (_debugIpc())
-                    this._logger.info?.(`milkdrop [ipc-server] queue eviction monitor=${this._monitorIndex}`);
+                    this._logger.info?.(`milkdrop [ipc-server] queue eviction monitor=${this._monitorIndex} totalDrops=${this._queueDropCount}`);
                 this._writeQueue.shift();
             }
         }
@@ -250,8 +255,16 @@ export class IpcServer {
         if (message.type === 'ready') {
             this._ready = true;
             this._sendDropLogged = false;
+            this._clientProtocolVersion = normalizeProtocolVersion(message);
+            if (!isSupportedProtocolVersion(this._clientProtocolVersion)) {
+                this._logger.warn?.(
+                    `milkdrop [ipc-server] renderer uses unsupported protocol version=${this._clientProtocolVersion}; supported=1..${IPC_PROTOCOL_VERSION}`
+                );
+            }
             if (_debugIpc())
-                this._logger.info?.(`milkdrop [ipc-server] ready received monitor=${this._monitorIndex}`);
+                this._logger.info?.(
+                    `milkdrop [ipc-server] ready received monitor=${this._monitorIndex} protocolVersion=${this._clientProtocolVersion}`
+                );
         }
 
         this._onMessage?.(message);
@@ -278,5 +291,19 @@ export class IpcServer {
             Gio.File.new_for_path(this.socketPath).delete(null);
         } catch (_error) {
         }
+    }
+
+    _toWireMessage(message) {
+        if (!message || typeof message !== 'object')
+            return message;
+        // Keep the frame hot path allocation-free when possible.
+        if (message.type === 'frame')
+            return message;
+        if (message.protocolVersion != null)
+            return message;
+        return {
+            protocolVersion: IPC_PROTOCOL_VERSION,
+            ...message,
+        };
     }
 }

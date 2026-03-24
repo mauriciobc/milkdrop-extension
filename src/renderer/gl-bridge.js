@@ -152,6 +152,25 @@ function supportsShmFdReceive() {
         (typeof proto.receive_fd === 'function' && typeof proto.get_socket === 'function');
 }
 
+function clearBridgeGSource(self, fieldName) {
+    const id = self[fieldName];
+    if (!id)
+        return;
+    GLib.source_remove(id);
+    self[fieldName] = 0;
+}
+
+function framePixelMetaDefaults(m) {
+    const width = m.width ?? 1;
+    return {
+        frame: m.frame ?? 0,
+        width,
+        height: m.height ?? 1,
+        stride: m.stride ?? Math.max(1, width * 4),
+        format: m.format ?? 'rgba8',
+    };
+}
+
 export class GlBridge {
     constructor({strictRenderPath = false, logger = console, onMessage = null}) {
         this._logger = logger;
@@ -340,10 +359,7 @@ export class GlBridge {
         this.send({type: 'resize', width, height});
     }
 
-    submitFrame(frameState) {
-        if (!this._running || !this._ready)
-            return;
-
+    _buildFrameHelperPayload(frameState) {
         const audio = frameState.audio ?? {};
         const pcmLeftSrc = Array.isArray(frameState.pcmLeft) ? frameState.pcmLeft
             : (Array.isArray(audio.pcmLeft) ? audio.pcmLeft : null);
@@ -360,7 +376,14 @@ export class GlBridge {
         if (frameState.presetPath != null && frameState.presetPath !== '')
             msg.presetPath = String(frameState.presetPath);
 
-        this.send(msg);
+        return msg;
+    }
+
+    submitFrame(frameState) {
+        if (!this._running || !this._ready)
+            return;
+
+        this.send(this._buildFrameHelperPayload(frameState));
     }
 
     changePreset(path) {
@@ -433,10 +456,7 @@ export class GlBridge {
 
     _teardownShmListener() {
         this._shmAcceptPending = false;
-        if (this._shmDrainSourceId) {
-            GLib.source_remove(this._shmDrainSourceId);
-            this._shmDrainSourceId = 0;
-        }
+        clearBridgeGSource(this, '_shmDrainSourceId');
         this._closeShmConnection();
         if (this._shmListener) {
             try {
@@ -460,10 +480,7 @@ export class GlBridge {
 
     _closeShmConnection() {
         this._shmReceivePending = false;
-        if (this._shmReceiveSourceId) {
-            GLib.source_remove(this._shmReceiveSourceId);
-            this._shmReceiveSourceId = 0;
-        }
+        clearBridgeGSource(this, '_shmReceiveSourceId');
         if (!this._shmConnection)
             return;
 
@@ -785,13 +802,7 @@ export class GlBridge {
         }
 
         if (message.type === 'frame-pixels-fd') {
-            const meta = {
-                frame: message.frame ?? 0,
-                width: message.width ?? 1,
-                height: message.height ?? 1,
-                stride: message.stride ?? Math.max(1, (message.width ?? 1) * 4),
-                format: message.format ?? 'rgba8',
-            };
+            const meta = framePixelMetaDefaults(message);
             const slot = this._shmSlots.find(s => s.meta === undefined);
             if (slot)
                 slot.meta = meta;
@@ -949,12 +960,9 @@ export class GlBridge {
         // SpiderMonkey may accumulate many live frames because it cannot see the C-heap
         // cost of the opaque GLib.Bytes wrapper objects.
         this._lastFramePixels = null;
+        const md = framePixelMetaDefaults(metadata);
         this._lastFramePixels = {
-            frame: metadata.frame ?? 0,
-            width: metadata.width ?? 1,
-            height: metadata.height ?? 1,
-            stride: metadata.stride ?? Math.max(1, (metadata.width ?? 1) * 4),
-            format: metadata.format ?? 'rgba8',
+            ...md,
             bytes,
             serial: this._lastFrameSerial,
         };
@@ -1054,10 +1062,7 @@ export class GlBridge {
     }
 
     _stopWatchdog() {
-        if (this._watchdogId) {
-            GLib.source_remove(this._watchdogId);
-            this._watchdogId = 0;
-        }
+        clearBridgeGSource(this, '_watchdogId');
     }
 
     _tryRestart() {

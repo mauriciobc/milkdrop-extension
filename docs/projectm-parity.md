@@ -43,3 +43,13 @@ Os testes em `tests/renderer/gl-bridge.test.js` cobrem a escolha do helper e o e
 
 - Presets **built-in** (não arquivo) não têm `presetPath`; o projectM backend pode exibir o preset idle ou o último preset carregado até que um preset de arquivo seja selecionado.
 - Texturas referenciadas nos presets devem estar acessíveis nos caminhos configurados (ex.: `--texture-path` para o helper ou diretórios de textura do projectM).
+
+## Checklist rápido de regressão (v2.0)
+
+Use esta sequência em mudanças de renderer/evaluator:
+
+1. `gjs -m tests/run.js`
+2. `gjs -m tests/run-parity.js`
+3. se o ambiente de bench estiver preparado: `gjs -m tests/bench/run.js -- --json`
+
+Se o benchmark falhar por falta de assets/presets no ambiente local, registrar no PR que a falha é ambiental e manter `run.js` + `run-parity.js` como gate obrigatório.
