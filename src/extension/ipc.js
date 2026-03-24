@@ -1,6 +1,6 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
-import {IPC_PROTOCOL_VERSION, isSupportedProtocolVersion, normalizeProtocolVersion} from '../shared/ipc-protocol.js';
+import {IPC_PROTOCOL_VERSION, isSupportedProtocolVersion, normalizeProtocolVersion} from './shared/ipc-protocol.js';
 
 const encoder = new TextEncoder();
 

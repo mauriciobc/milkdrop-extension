@@ -31,6 +31,7 @@ extension_sources = files(
   'src/extension/audio.js',
   'src/extension/evaluator.js',
   'src/extension/extension.js',
+  'src/extension/frame-state.js',
   'src/extension/gnomeShellOverride.js',
   'src/extension/ipc.js',
   'src/extension/monitor.js',
@@ -102,6 +103,10 @@ else
 endif
 
 install_data(extension_sources, install_dir: extension_dir)
+install_data(
+  'src/shared/ipc-protocol.js',
+  install_dir: join_paths(extension_dir, 'shared'),
+)
 install_data('src/extension/preset-loader-process.js', install_dir: join_paths(extension_dir, 'extension'))
 install_data(expr_sources, install_dir: join_paths(extension_dir, 'expr'))
 install_data(expr_sources, install_dir: join_paths(extension_dir, 'extension', 'expr'))
