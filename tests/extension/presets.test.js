@@ -1,7 +1,7 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
-import {PresetStore} from '../../src/extension/presets.js';
+import {PresetStore, validatePresetExpressions} from '../../src/extension/presets.js';
 
 export async function run(assert) {
     const store = new PresetStore();
@@ -64,6 +64,58 @@ export async function run(assert) {
             } catch (_error) {
             }
         }
+    }
+
+    {
+        const tempDir = GLib.dir_make_tmp('milkdrop-invalid-presets-XXXXXX');
+        const goodPath = GLib.build_filenamev([tempDir, 'good.milk']);
+        const badPath = GLib.build_filenamev([tempDir, 'bad.milk']);
+        GLib.file_set_contents(goodPath,
+            '[preset00]\nper_frame_1=zoom=zoom+0.01;\n');
+        GLib.file_set_contents(badPath,
+            '[preset00]\nper_frame_1=a=b&c=d;\n');
+
+        const settings = {
+            settings_schema: {
+                has_key: key => key === 'preset-directory',
+            },
+            get_string: () => tempDir,
+        };
+
+        try {
+            const store = new PresetStore({settings});
+            const index = await store.loadIndex();
+            assert(index.some(e => e.id.endsWith('good.milk')),
+                'valid external .milk stays in index');
+            assert(!index.some(e => e.id.endsWith('bad.milk')),
+                'invalid-expression .milk is omitted from index');
+        } finally {
+            for (const p of [goodPath, badPath]) {
+                try {
+                    Gio.File.new_for_path(p).delete(null);
+                } catch (_e) {}
+            }
+            try {
+                Gio.File.new_for_path(tempDir).delete(null);
+            } catch (_e) {}
+        }
+    }
+
+    {
+        assert(validatePresetExpressions({
+            init_eqs: '',
+            frame_eqs: 'zoom=1;',
+            pixel_eqs: '',
+            customWaves: [null, null, null, null],
+            customShapes: [null, null, null, null],
+        }), 'validatePresetExpressions accepts minimal preset');
+        assert(!validatePresetExpressions({
+            init_eqs: '',
+            frame_eqs: 'a=b&c=d;',
+            pixel_eqs: '',
+            customWaves: [null, null, null, null],
+            customShapes: [null, null, null, null],
+        }), 'validatePresetExpressions rejects bad frame_eqs');
     }
 
     {

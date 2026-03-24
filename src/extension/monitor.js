@@ -28,6 +28,12 @@ const MEDIA_OVERLAY_FADE_MS = 400;
 const VALID_ROTATION_MODES = new Set(['random', 'sequential']);
 const PROBE_MIN_STABLE_FRAMES = 20;
 const PROBE_TIMEOUT_MS = 5000;
+/**
+ * Require this many helper `frame-stat` steps after probe baseline per monitor
+ * before a frame-based probe commit (see journalctl: native helper can segfault
+ * in render_frame right after a premature "probe committed stable").
+ */
+const PROBE_MIN_HELPER_FRAME_ADVANCE = 20;
 /** When MILKDROP_DEBUG_HANG=1, warn if frame pump or evaluator exceeds this (µs). */
 const SLOW_FRAME_THRESHOLD_US = 50000;
 
@@ -636,6 +642,8 @@ export class MonitorManager {
         this._probeCrashed = false;
         this._probeFrameTarget = 0;
         this._probeTimeoutId = 0;
+        /** @type {Map<number, number>} monitorIndex -> helper frame_count at probe baseline */
+        this._probeHelperFrameBaseline = new Map();
         this._lastStablePreset = null;
         this._presetFileCount = 0;
         this._presetEligibleFileCount = 0;
@@ -879,6 +887,9 @@ export class MonitorManager {
         if (!this._enabled || this._disabling)
             return;
 
+        if (this._probeActive)
+            this._rollbackProbe({ stage: 'renderer_exit', msg: `monitor ${monitorIndex}` });
+
         const now = GLib.get_monotonic_time() / 1000;
         this._crashTimestamps.push(now);
         const windowStart = now - CRASH_WINDOW_MS;
@@ -988,15 +999,6 @@ export class MonitorManager {
 
                 this._frameCounter += 1;
 
-                if (shouldCommitByFrames({
-                    probeActive: this._probeActive,
-                    probeCrashed: this._probeCrashed,
-                    frameCounter: this._frameCounter,
-                    probeFrameTarget: this._probeFrameTarget,
-                })) {
-                    this._commitProbe('frames');
-                }
-
                 const pumpToken = perfBegin('frame-pump');
 
                 if (_debugIpc() && this._frameCounter % 60 === 0)
@@ -1017,6 +1019,18 @@ export class MonitorManager {
                     }
                 }
 
+                const minHelperReq = this._rendererProcesses.size > 0 ? PROBE_MIN_HELPER_FRAME_ADVANCE : 0;
+                if (shouldCommitByFrames({
+                    probeActive: this._probeActive,
+                    probeCrashed: this._probeCrashed,
+                    frameCounter: this._frameCounter,
+                    probeFrameTarget: this._probeFrameTarget,
+                    minHelperFrameAdvance: minHelperReq,
+                    helperFrameMinAdvance: this._getProbeHelperMinAdvance(),
+                })) {
+                    this._commitProbe('frames');
+                }
+
                 const pumpEndUs = GLib.get_monotonic_time();
                 perfEnd(pumpToken);
                 if (_debugHang() && pumpToken && (pumpEndUs - pumpToken.start) > SLOW_FRAME_THRESHOLD_US)
@@ -1033,6 +1047,53 @@ export class MonitorManager {
 
     _cancelProbeTimers() {
         _clearGlibSource(this, '_probeTimeoutId');
+    }
+
+    _clearProbeHelperBaselines() {
+        this._probeHelperFrameBaseline.clear();
+    }
+
+    _ensureProbeHelperBaselines() {
+        if (!this._probeActive)
+            return;
+        for (const [idx, proc] of this._rendererProcesses) {
+            if (!proc.ready)
+                continue;
+            if (!this._probeHelperFrameBaseline.has(idx)) {
+                const n = proc.lastFrameStat?.frameCount;
+                this._probeHelperFrameBaseline.set(idx, typeof n === 'number' ? n : 0);
+            }
+        }
+    }
+
+    /**
+     * Minimum (across monitors) of (helper frame_count - baseline) since probe start.
+     * 0 if any expected renderer is not ready or has not reported frame-stat yet.
+     */
+    _getProbeHelperMinAdvance() {
+        if (this._rendererProcesses.size === 0)
+            return 0;
+        this._ensureProbeHelperBaselines();
+        let minAdv = Number.POSITIVE_INFINITY;
+        for (const [idx, proc] of this._rendererProcesses) {
+            if (!proc.ready) {
+                minAdv = 0;
+                break;
+            }
+            const base = this._probeHelperFrameBaseline.get(idx);
+            if (typeof base !== 'number') {
+                minAdv = 0;
+                break;
+            }
+            const cur = proc.lastFrameStat?.frameCount ?? base;
+            const adv = cur - base;
+            if (!Number.isFinite(adv) || adv < 0) {
+                minAdv = 0;
+                break;
+            }
+            minAdv = Math.min(minAdv, adv);
+        }
+        return Number.isFinite(minAdv) && minAdv !== Number.POSITIVE_INFINITY ? minAdv : 0;
     }
 
     _abortProbeAfterEvaluatorRejected(preset) {
@@ -1055,6 +1116,7 @@ export class MonitorManager {
         } catch (_e) {}
 
         this._cancelProbeTimers();
+        this._clearProbeHelperBaselines();
         this._probeActive = false;
         this._probePreset = null;
         this._probePresetId = null;
@@ -1077,6 +1139,41 @@ export class MonitorManager {
         this._helperPresetEnabled = false;
     }
 
+    _abortProbeTimeoutInsufficientHelper() {
+        const preset = this._probePreset;
+        if (!preset?.id)
+            return;
+
+        const debugId = String(preset.id);
+        this._evaluatorRejectedPresetIds.add(debugId);
+        this._lastRejectedPresetId = debugId;
+        try {
+            this._crashQuarantine.recordCrash(preset.id);
+        } catch (_e) {}
+
+        this._logger.warn?.(
+            `milkdrop probe aborted: timeout without enough native helper frames presetId=${debugId}`
+        );
+
+        this._cancelProbeTimers();
+        this._clearProbeHelperBaselines();
+        this._probeActive = false;
+        this._probePreset = null;
+        this._probePresetId = null;
+        this._probeCrashed = false;
+        this._probeFrameTarget = 0;
+
+        if (this._lastStablePreset)
+            this._applyPreset(this._lastStablePreset, 'probe-timeout-no-helper');
+        else {
+            this._currentPreset = null;
+            this._evaluator.loadPreset(null);
+        }
+
+        this._currentPreset = preset;
+        this._helperPresetEnabled = false;
+    }
+
     _beginProbe(preset, reason = 'probe') {
         if (!preset || !preset.id)
             return false;
@@ -1086,6 +1183,7 @@ export class MonitorManager {
             return false;
         }
 
+        this._clearProbeHelperBaselines();
         this._probeActive = true;
         this._probePreset = preset;
         this._probePresetId = preset.id;
@@ -1107,7 +1205,12 @@ export class MonitorManager {
                 probeStartMs: startedAt,
                 probeTimeoutMs: PROBE_TIMEOUT_MS,
             })) {
-                this._commitProbe('timeout');
+                const spawned = this._rendererProcesses.size > 0;
+                const adv = this._getProbeHelperMinAdvance();
+                if (!spawned || adv >= PROBE_MIN_HELPER_FRAME_ADVANCE)
+                    this._commitProbe('timeout');
+                else
+                    this._abortProbeTimeoutInsufficientHelper();
             }
             return GLib.SOURCE_REMOVE;
         });
@@ -1141,6 +1244,7 @@ export class MonitorManager {
         this._probePresetId = null;
         this._probeCrashed = false;
         this._probeFrameTarget = 0;
+        this._clearProbeHelperBaselines();
 
         if (this._lastStablePreset)
             this._logger.warn?.(`milkdrop probe committed stable presetId=${this._lastStablePreset.id} reason=${reason}`);
@@ -1164,6 +1268,7 @@ export class MonitorManager {
         this._probePreset = null;
         this._probePresetId = null;
         this._probeFrameTarget = 0;
+        this._clearProbeHelperBaselines();
 
         if (rollbackPreset)
             this._applyPreset(rollbackPreset, 'probe-rollback');
@@ -1206,6 +1311,7 @@ export class MonitorManager {
         this._probePresetId = null;
         this._probeCrashed = false;
         this._probeFrameTarget = 0;
+        this._clearProbeHelperBaselines();
         this._lastStablePreset = null;
 
         if (filePresets.length === 0) {

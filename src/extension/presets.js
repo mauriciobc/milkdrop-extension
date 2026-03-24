@@ -176,7 +176,7 @@ function sanitiseCustomShapes(raw) {
  * @param {object} preset - Sanitised preset with init_eqs, frame_eqs, pixel_eqs, customWaves, customShapes
  * @returns {boolean} - true if all expressions are valid, false otherwise
  */
-function validatePresetExpressions(preset) {
+export function validatePresetExpressions(preset) {
     if (!preset || typeof preset !== 'object')
         return true;
     try {
@@ -393,6 +393,12 @@ export class PresetStore {
                         continue;
                     if (p.source !== 'file')
                         continue;
+                    if (!validatePresetExpressions(p)) {
+                        this._logger.debug?.(
+                            `milkdrop skipping preset with invalid expressions: ${p.path ?? p.id}`
+                        );
+                        continue;
+                    }
                     presets.push(p);
                 }
             } else if (parsed && parsed.ok === false) {

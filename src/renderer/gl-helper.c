@@ -640,12 +640,24 @@ render_frame(HelperState *state, double time_value,
     }
     state->invalid_surface_logged = false;
 
+    const int width = state->width;
+    const int height = state->height;
+    const int stride = state->stride;
+    if (width < 1 || height < 1 || stride < width * 4) {
+        emit_telemetry("render", "warn", "invalid dimensions; skipping frame", 0);
+        return;
+    }
+
     /* Load preset if changed */
     if (preset_path && preset_path[0]) {
         if (!state->current_preset_path || strcmp(preset_path, state->current_preset_path) != 0) {
-            g_free(state->current_preset_path);
-            state->current_preset_path = g_strdup(preset_path);
-            projectm_load_preset_file(state->projectm, preset_path, false);
+            if (!g_file_test(preset_path, G_FILE_TEST_IS_REGULAR)) {
+                emit_telemetry("preset", "warn", "preset path is not a readable file; skipping load", 0);
+            } else {
+                g_free(state->current_preset_path);
+                state->current_preset_path = g_strdup(preset_path);
+                projectm_load_preset_file(state->projectm, preset_path, false);
+            }
         }
     }
 
@@ -663,15 +675,22 @@ render_frame(HelperState *state, double time_value,
         projectm_pcm_add_float(state->projectm, interleaved, (unsigned int)count, PROJECTM_STEREO);
     }
 
-    const int width = state->width;
-    const int height = state->height;
-    const int stride = state->stride;
     const gsize pixel_count = (gsize)stride * (gsize)height;
 
     gint64 render_start = g_get_monotonic_time();
 
     PERF_BEGIN(projectm_render);
     glBindFramebuffer(GL_FRAMEBUFFER, state->readback_fbo);
+    {
+        GLenum fb_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (fb_status != GL_FRAMEBUFFER_COMPLETE) {
+            char msg[96];
+            g_snprintf(msg, sizeof(msg), "readback FBO incomplete (0x%04x)", (unsigned)fb_status);
+            emit_telemetry("render", "warn", msg, 0);
+            PERF_END(projectm_render);
+            return;
+        }
+    }
     glViewport(0, 0, width, height);
     projectm_opengl_render_frame_fbo(state->projectm, state->readback_fbo);
     PERF_END(projectm_render);
@@ -858,10 +877,15 @@ dispatch_stdin_message(JsonObject *obj, HelperState *state)
         gchar *path = get_string_dup(obj, "path");
         json_object_unref(obj);
         if (path) {
-            g_free(state->current_preset_path);
-            state->current_preset_path = path;
-            if (state->projectm)
-                projectm_load_preset_file(state->projectm, path, false);
+            if (g_file_test(path, G_FILE_TEST_IS_REGULAR)) {
+                g_free(state->current_preset_path);
+                state->current_preset_path = path;
+                if (state->projectm)
+                    projectm_load_preset_file(state->projectm, path, false);
+            } else {
+                emit_telemetry("preset", "warn", "preset-change path is not a regular file; ignoring", 0);
+                g_free(path);
+            }
         }
         return MSG_LOOP_CONTINUE;
     }

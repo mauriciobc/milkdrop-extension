@@ -64,6 +64,7 @@ Runs inside the gnome-shell process (GJS). Owns:
 - MilkDrop expression engine (`expr/`) — lexer → parser → AST → closure compiler (no `eval`)
 - Per-frame equation evaluation (`evaluator.js`)
 - Preset loading and indexing (`presets.js`)
+- **Preset resilience (journal-backed):** `milkdrop-gl-helper` can segfault in `render_frame` on hostile `.milk` files. The extension indexes only presets that pass `validatePresetExpressions` after full `parseMilkPreset` output from `preset-loader-process.js`; probe “stable” commit waits for native `frame-stat` advancement (`PROBE_MIN_HELPER_FRAME_ADVANCE` in `monitor.js`) when renderers are running, and runs only after `sendFrame` in the pump (not before).
 - Unix socket IPC server (`ipc.js`) — sends `frame-state` JSON to renderer every ~50ms
 - Wallpaper clone management and GNOME Shell overrides (`wallpaper.js`, `gnomeShellOverride.js`)
 

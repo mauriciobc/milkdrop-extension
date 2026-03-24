@@ -14,6 +14,28 @@ export async function run(assert) {
             !shouldCommitByFrames({probeActive: false, probeCrashed: false, frameCounter: 999, probeFrameTarget: 0}),
             'do not commit by frames when probeActive is false'
         );
+        assert(
+            !shouldCommitByFrames({
+                probeActive: true,
+                probeCrashed: false,
+                frameCounter: 50,
+                probeFrameTarget: 10,
+                minHelperFrameAdvance: 20,
+                helperFrameMinAdvance: 5,
+            }),
+            'do not commit when helper has not advanced enough frames'
+        );
+        assert(
+            shouldCommitByFrames({
+                probeActive: true,
+                probeCrashed: false,
+                frameCounter: 50,
+                probeFrameTarget: 10,
+                minHelperFrameAdvance: 20,
+                helperFrameMinAdvance: 20,
+            }),
+            'commit when helper frame advance meets threshold'
+        );
     }
 
     {

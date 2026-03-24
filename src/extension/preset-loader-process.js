@@ -2,73 +2,10 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import System from 'system';
 
+import {parseMilkPreset} from './milk-parser.js';
+
 function _printJson(obj) {
     print(JSON.stringify(obj));
-}
-
-function _parsePresetValues(content) {
-    const values = {};
-    const lines = content.split('\n');
-    let currentSection = null;
-
-    for (const line of lines) {
-        const trimmed = line.trim();
-
-        const sectionMatch = trimmed.match(/^\[(\w+)\]$/);
-        if (sectionMatch) {
-            currentSection = sectionMatch[1];
-            if (currentSection.startsWith('preset'))
-                values.name = currentSection;
-            continue;
-        }
-
-        if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('#'))
-            continue;
-
-        const eqIdx = trimmed.indexOf('=');
-        if (eqIdx === -1) {
-            const spaceIdx = trimmed.indexOf(' ');
-            if (spaceIdx > 0) {
-                const key = trimmed.substring(0, spaceIdx).trim();
-                const val = trimmed.substring(spaceIdx + 1).trim();
-                if (key && val)
-                    values[key] = val;
-            }
-            continue;
-        }
-
-        const key = trimmed.substring(0, eqIdx).trim();
-        const val = trimmed.substring(eqIdx + 1).trim();
-        if (!key)
-            continue;
-        values[key] = val;
-    }
-    return values;
-}
-
-function _parseCodeBlock(content, prefix) {
-    const lines = content.split('\n');
-    let code = '';
-    let inBlock = false;
-    let lastNum = -1;
-
-    for (const line of lines) {
-        const match = line.match(new RegExp(`^${prefix}(\\d+)=(.*)`));
-        if (!match) {
-            if (inBlock)
-                break;
-            continue;
-        }
-
-        const num = parseInt(match[1]);
-        if (lastNum !== -1 && num !== lastNum + 1)
-            break;
-
-        inBlock = true;
-        lastNum = num;
-        code += match[2] + '\n';
-    }
-    return code;
 }
 
 function _readText(path) {
@@ -107,15 +44,22 @@ function _listMilkFiles(dirPath) {
     return out;
 }
 
-function _buildPresetFromMilkText(text, absPath) {
-    const values = _parsePresetValues(text);
-    const frame_eqs = _parseCodeBlock(text, 'per_frame_');
-    const pixel_eqs = _parseCodeBlock(text, 'per_pixel_');
-    const init_eqs = _parseCodeBlock(text, 'init_');
+/** Milk parser uses sparse arrays; ExpressionEvaluator expects 4 slots. */
+function _slots4(arr) {
+    const out = [null, null, null, null];
+    if (!Array.isArray(arr))
+        return out;
+    for (let i = 0; i < 4; i++)
+        out[i] = arr[i] ?? null;
+    return out;
+}
 
-    const name = (typeof values?.name === 'string' && values.name.trim())
-        ? values.name.trim()
-        : GLib.path_get_basename(absPath);
+function _buildPresetFromMilkText(text, absPath) {
+    const parsed = parseMilkPreset(text);
+    const baseName = GLib.path_get_basename(absPath);
+    const name = (typeof parsed.name === 'string' && parsed.name.trim())
+        ? parsed.name.trim()
+        : baseName;
 
     return {
         id: `file:${absPath}`,
@@ -123,9 +67,12 @@ function _buildPresetFromMilkText(text, absPath) {
         description: '',
         source: 'file',
         path: absPath,
-        init_eqs,
-        frame_eqs,
-        pixel_eqs,
+        baseVals: parsed.baseVals && typeof parsed.baseVals === 'object' ? {...parsed.baseVals} : {},
+        init_eqs: typeof parsed.init_eqs === 'string' ? parsed.init_eqs : '',
+        frame_eqs: typeof parsed.frame_eqs === 'string' ? parsed.frame_eqs : '',
+        pixel_eqs: typeof parsed.pixel_eqs === 'string' ? parsed.pixel_eqs : '',
+        customWaves: _slots4(parsed.waves),
+        customShapes: _slots4(parsed.shapes),
     };
 }
 
@@ -154,4 +101,3 @@ function main(argv) {
 }
 
 System.exit(main(ARGV));
-
