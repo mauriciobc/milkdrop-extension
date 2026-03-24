@@ -26,7 +26,6 @@ const FRAME_MESSAGE = {
         high: 0.22,
         beat: 0,
         decay: 0.98,
-        waveData: [],
         pcmLeft: new Array(576).fill(0),
         pcmRight: new Array(576).fill(0),
     },

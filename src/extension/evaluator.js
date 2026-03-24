@@ -186,16 +186,6 @@ export class Evaluator {
             this._prevExprCtx = { zoom, rot, dx, dy, decay };
 
             const renderControls = buildRenderControls(ctx);
-            
-            // Evaluate custom shapes and waves to keep per-frame expression state current.
-            // Results are not forwarded via IPC (renderer does not consume them).
-            this._exprEval.evaluateCustomShapes();
-            this._exprEval.evaluateCustomWaves({
-                pcmLeft: incomingAudio.pcmLeft || [],
-                pcmRight: incomingAudio.pcmRight || [],
-                spectrumLeft: incomingAudio.pcmLeft || [],
-                spectrumRight: incomingAudio.pcmRight || [],
-            });
 
             return {
                 ...frameState,

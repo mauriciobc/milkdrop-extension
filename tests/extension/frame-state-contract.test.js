@@ -10,7 +10,6 @@ function _normalizeAudio(raw) {
         high: Number(raw?.high ?? 0),
         beat: Number(raw?.beat ?? 0),
         decay: Number(raw?.decay ?? 0),
-        waveData: raw?.waveData || [],
         pcmLeft: raw?.active ? (raw?.pcmLeft || []) : [],
         pcmRight: raw?.active ? (raw?.pcmRight || []) : [],
     };
@@ -36,7 +35,6 @@ function _buildFrameState({preset = null, audio = null, currentPresetForPath = n
             high: 0.125,
             beat: 0,
             decay: 0.1,
-            waveData: [],
             pcmLeft: [0, 0.1, -0.1],
             pcmRight: [0, -0.1, 0.1],
         },
@@ -80,7 +78,6 @@ export function run(assert) {
         _assertFiniteNumber(assert, frameState.audio.high, 'frameState.audio.high is a finite number');
         _assertFiniteNumber(assert, frameState.audio.beat, 'frameState.audio.beat is a finite number');
         _assertFiniteNumber(assert, frameState.audio.decay, 'frameState.audio.decay is a finite number');
-        assert(Array.isArray(frameState.audio.waveData), 'frameState.audio.waveData is an array');
         assert(Array.isArray(frameState.audio.pcmLeft), 'frameState.audio.pcmLeft is an array');
         assert(Array.isArray(frameState.audio.pcmRight), 'frameState.audio.pcmRight is an array');
 
@@ -97,7 +94,6 @@ export function run(assert) {
             high: 0,
             beat: 0,
             decay: 0,
-            waveData: [],
             pcmLeft: [1, 2, 3],
             pcmRight: [4, 5, 6],
         };

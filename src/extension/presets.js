@@ -604,9 +604,7 @@ export class PresetStore {
     }
 
     getBootstrapPreset() {
-        // Compatibility hook: no built-in presets are exposed anymore.
-        // Callers should treat this as "no preset selected".
-        return null;
+        return clonePreset(BOOTSTRAP_PRESET);
     }
 
     invalidateCache() {

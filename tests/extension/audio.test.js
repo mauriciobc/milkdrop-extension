@@ -568,29 +568,4 @@ export function run(assert) {
         assert(Math.abs(features.treb_att - (features.high * 0.7)) <= epsilon,
             'getFeatures derives treb_att from scaled high');
     }
-
-    // Public audio contract exposes waveform sample payload for renderer waveform pass.
-    {
-        const engine = new AudioEngine({logger: buildLogger([])});
-        engine._enabled = true;
-        engine._lastUpdateUsec = GLib.get_monotonic_time();
-        engine._features = {
-            ...engine._features,
-            source: 'pulse:test',
-            active: true,
-            energy: 0.5,
-            bass: 0.4,
-            mid: 0.3,
-            high: 0.2,
-            beat: 0,
-            decay: 0.1,
-            waveData: [0.0, 0.5, 1.0, 0.25],
-        };
-
-        const features = engine.getFeatures();
-        assert(Array.isArray(features.waveData), 'getFeatures exposes waveData payload');
-        assert(features.waveData.length === 4, 'getFeatures preserves waveData payload length');
-        assert(Math.abs(features.waveData[2] - 1.0) < 1e-9,
-            'getFeatures preserves waveData payload values');
-    }
 }

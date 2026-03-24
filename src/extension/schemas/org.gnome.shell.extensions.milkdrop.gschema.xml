@@ -8,7 +8,7 @@
       <description>List of monitor indices that should run a renderer. Empty means all monitors.</description>
     </key>
     <key name="preset-rotation-interval" type="i">
-      <default>15</default>
+      <default>0</default>
       <summary>Preset rotation interval</summary>
       <description>Seconds between automatic preset changes. Zero keeps manual rotation only.</description>
     </key>
@@ -76,11 +76,6 @@
       <default>2500</default>
       <summary>Audio reprobe delay</summary>
       <description>Delay in milliseconds before retrying monitor-source selection when auto mode is in fallback.</description>
-    </key>
-    <key name="eval-backend" type="s">
-      <default>'subprocess'</default>
-      <summary>Evaluator backend</summary>
-      <description>Evaluator backend mode for per-frame expression execution.</description>
     </key>
     <key name="debug-renderer" type="b">
       <default>false</default>

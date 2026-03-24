@@ -1602,6 +1602,7 @@ export class MonitorManager {
             audio: this._audioEngine.getFeatures(),
         };
 
+        const audioClone = JSON.parse(JSON.stringify(baseFrameState.audio));
         const evalToken = perfBegin('evaluator');
         const evaluated = this._evaluator.evaluateFrame(baseFrameState);
         const evalEndUs = GLib.get_monotonic_time();
@@ -1609,8 +1610,7 @@ export class MonitorManager {
         if (_debugHang() && evalToken && (evalEndUs - evalToken.start) > SLOW_FRAME_THRESHOLD_US)
             this._logger.warn?.(`milkdrop [extension] slow evaluator: ${((evalEndUs - evalToken.start) / 1000).toFixed(1)}ms (may block main loop)`);
 
-        // Guarantee a plain, JSON-serializable audio object so the renderer always receives audio data
-        const raw = evaluated.audio ?? this._audioEngine.getFeatures();
+        const raw = audioClone;
         evaluated.audio = {
             source: String(raw?.source ?? 'stub'),
             active: Boolean(raw?.active),
@@ -1620,7 +1620,6 @@ export class MonitorManager {
             high: Number(raw?.high ?? 0),
             beat: Number(raw?.beat ?? 0),
             decay: Number(raw?.decay ?? 0),
-            waveData: raw?.waveData || [],
             pcmLeft: raw?.active ? (raw?.pcmLeft || []) : [],
             pcmRight: raw?.active ? (raw?.pcmRight || []) : [],
         };
@@ -1632,9 +1631,10 @@ export class MonitorManager {
             evaluated.presetPath = undefined;
         }
 
-        // Beat-cut: trigger immediate preset rotation on beat if enabled
+        // Beat-cut: trigger immediate preset rotation on beat if enabled.
+        // Gated on !_probeActive to avoid interrupting an ongoing probe/commit sequence.
         // Cooldown is configurable for beat-cut behavior.
-        if (this._getBooleanSetting('beat-cuts-enabled', false) && evaluated.audio?.beat) {
+        if (!this._probeActive && this._getBooleanSetting('beat-cuts-enabled', false) && evaluated.audio?.beat) {
             const now = GLib.get_monotonic_time() / 1000000;
             const cooldown = Math.max(0, this._getDoubleSetting('beat-cut-cooldown-sec', DEFAULT_BEAT_CUT_COOLDOWN_SEC));
             if (now - this._lastBeatCutTime > cooldown) {

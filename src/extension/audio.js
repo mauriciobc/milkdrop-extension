@@ -175,7 +175,6 @@ export class AudioEngine {
             treb_att: clamp01(f.high * s07),
             beat: active ? clamp01(f.beat) : 0,
             decay: clamp01(f.decay * s),
-            waveData: f.waveData,
             pcmLeft: f.pcmLeft,
             pcmRight: f.pcmRight,
         };
@@ -964,7 +963,6 @@ export class AudioEngine {
             active: false,
             energy: 0, bass: 0, mid: 0, high: 0,
             beat: 0, decay: 0,
-            waveData: [],
             pcmLeft: new Float32Array(PCM_SAMPLES),
             pcmRight: new Float32Array(PCM_SAMPLES),
         };

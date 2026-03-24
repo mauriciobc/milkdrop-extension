@@ -38,7 +38,7 @@ export class PresetCrashQuarantine {
         if (nowMs < until)
             return true;
 
-        this._blacklistedUntilById.delete(presetId);
+        this._blacklistedUntilById.delete(id);
         return false;
     }
 

@@ -50,7 +50,6 @@ export function run(assert) {
         assert('treb_att' in features, 'getFeatures returns treb_att');
         assert('beat' in features, 'getFeatures returns beat');
         assert('decay' in features, 'getFeatures returns decay');
-        assert('waveData' in features, 'getFeatures returns waveData');
         assert('pcmLeft' in features, 'getFeatures returns pcmLeft');
         assert('pcmRight' in features, 'getFeatures returns pcmRight');
         

@@ -28,6 +28,21 @@ function addEntryRow(group, settings, key, title, subtitle) {
     group.add(row);
 }
 
+function addComboRow(group, settings, key, title, subtitle, choices) {
+    const model = new Gtk.StringList();
+    for (const c of choices) model.append(c);
+    const row = new Adw.ComboRow({title, subtitle, model});
+    const indexOf = (val) => choices.indexOf(String(val));
+    const sync = () => {
+        const idx = indexOf(settings.get_string(key));
+        if (idx >= 0) row.selected = idx;
+    };
+    sync();
+    row.connect('notify::selected', () => settings.set_string(key, choices[row.selected] ?? 'random'));
+    settings.connect(`changed::${key}`, sync);
+    group.add(row);
+}
+
 function addFolderRow(group, settings, key, title, subtitle, parentWindow) {
     const row = new Adw.ActionRow({title, subtitle});
     const entry = new Gtk.Entry({hexpand: true, valign: Gtk.Align.CENTER, editable: false});
@@ -104,7 +119,6 @@ export default class MilkdropPreferences extends ExtensionPreferences {
         addEntryRow(audioGroup, settings, 'audio-source', _('Audio source'), _('Output monitor source name (for example alsa_output...monitor) or auto (never microphone fallback).'));
         addSpinRow(audioGroup, settings, 'audio-restart-max-attempts', _('Audio restart max attempts'), _('Applies after audio pipeline restart/reprobe.'), new Gtk.Adjustment({lower: 0, upper: 100, step_increment: 1, page_increment: 5, value: 3}));
         addSpinRow(audioGroup, settings, 'audio-reprobe-delay-ms', _('Audio reprobe delay (ms)'), _('Applies after audio pipeline restart/reprobe.'), new Gtk.Adjustment({lower: 250, upper: 120000, step_increment: 50, page_increment: 500, value: 2500}));
-        addEntryRow(audioGroup, settings, 'eval-backend', _('Evaluator backend'), _('Current values: subprocess, gi, or js.'));
 
         const advancedPage = new Adw.PreferencesPage({
             title: _('Advanced'),
@@ -127,7 +141,7 @@ export default class MilkdropPreferences extends ExtensionPreferences {
         addSwitchRow(advancedGroup, settings, 'debug-renderer', _('Debug renderer'), _('Enable verbose renderer logging during development.'));
         addSwitchRow(advancedGroup, settings, 'strict-render-path', _('Strict render path'), _('Disable legacy Base64 frame fallback and require shared-memory frame transport.'));
         addSpinRow(advancedGroup, settings, 'preset-rotation-interval', _('Preset rotation interval'), _('Seconds between automatic preset changes.'), new Gtk.Adjustment({lower: 0, upper: 600, step_increment: 1, page_increment: 10, value: 0}));
-        addEntryRow(advancedGroup, settings, 'preset-rotation-mode', _('Preset rotation mode'), _('Use random or sequential. Applies on the next rotation tick.'));
+        addComboRow(advancedGroup, settings, 'preset-rotation-mode', _('Preset rotation mode'), _('Applies on the next rotation tick.'), ['random', 'sequential']);
         addSwitchRow(advancedGroup, settings, 'beat-cuts-enabled', _('Beat cuts enabled'), _('Allow beat events to trigger preset changes.'));
         addSpinRow(advancedGroup, settings, 'beat-cut-cooldown-sec', _('Beat-cut cooldown (sec)'), _('Minimum seconds between beat-triggered preset cuts (applies immediately).'), new Gtk.Adjustment({lower: 0.0, upper: 30.0, step_increment: 0.1, page_increment: 0.5, value: 2.0}));
         addSpinRow(advancedGroup, settings, 'blend-time', _('Blend time'), _('Seconds used for preset blending.'), new Gtk.Adjustment({lower: 0.0, upper: 10.0, step_increment: 0.1, page_increment: 0.5, value: 2.0}));
