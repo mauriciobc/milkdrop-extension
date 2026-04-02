@@ -57,7 +57,6 @@ After changing the schema XML, recompile schemas in the installed extension dire
 | pause-when-fullscreen | b | src/extension/monitor.js |
 | fps-limit | i | src/extension/monitor.js |
 | audio-source | s | src/extension/audio.js |
-| audio-sensitivity | d | src/extension/audio.js |
 | audio-restart-max-attempts | i | src/extension/audio.js |
 | audio-reprobe-delay-ms | i | src/extension/audio.js |
 | preset-rotation-interval | i | src/extension/monitor.js |
@@ -94,17 +93,6 @@ If the on-screen audio values (energy, bass, mid, high) stay fixed, use the diag
 2. **Renderer:** With the extension running, the renderer process logs once per second to stderr: `milkdrop renderer audio debug: ...`. Compare with the extension log; if extension values change but renderer values stay fixed, the issue is IPC or how the renderer receives frames.
 
 3. **Configuration:** Prefs → Audio source. Use `auto` for default monitor; if no monitor is found, the pipeline falls back to a silent stub and values stay at zero (see docs/pipewire-audio-source-research.md).
-
-### Beat detection diagnostics
-
-To tune beat detection against real audio, run with **`MILKDROP_DEBUG_BEAT=1`** in the same environment (e.g. `MILKDROP_DEBUG_BEAT=1 dbus-run-session gnome-shell --wayland`). Then run `just logs` (or `journalctl -f ... | grep milkdrop`).
-
-- **When beat=1:** Every trigger is logged with energy (E), bass (B), rolling averages (avgE, avgB), variance (varE, varB), adaptive thresholds (threshE, threshB), the required level to trigger (needE, needB), and which band fired (E_beat, B_beat).
-- **When beat=0:** Every 20th spectrum message is logged with the same numbers so you can see how close you were (e.g. `E=0.42 needE=0.48` means energy was below the line).
-
-Use this to decide whether to lower/raise constants in `src/extension/audio.js` (e.g. `BEAT_THRESHOLD_LOW`, `BEAT_THRESHOLD_HIGH`, `BEAT_THRESHOLD_VARIANCE_SLOPE`, `BEAT_NOISE_FLOOR`) or to change the logic (e.g. use only bass, or a different formula).
-
-**Sampling interval:** The GStreamer spectrum element uses `interval=${SPECTRUM_INTERVAL_NS}` (nanoseconds; default 50 ms). Beat detection uses **time-based** parameters derived from this interval: `BEAT_HISTORY_MS` (e.g. 1000 ms) and `BEAT_COOLDOWN_MS` (e.g. 100 ms) are converted to frame counts. If you change `SPECTRUM_INTERVAL_NS` (e.g. to 25 ms for more updates or 100 ms for less CPU), history length and cooldown in **wall-clock seconds** stay the same.
 
 ## Benchmarking & Profiling
 
@@ -246,7 +234,6 @@ Enable the extension, use it until it hangs or slows down, then stop with Ctrl+C
 | Variable | Effect |
 | --- | --- |
 | `MILKDROP_DEBUG_IPC=1` | Log frame writes and audio data every ~1s |
-| `MILKDROP_DEBUG_BEAT=1` | Log beat detection decisions |
 | `MILKDROP_DEBUG_HANG=1` | Warn when a frame pump or evaluator run exceeds 50 ms (main-loop blocking) |
 | `MILKDROP_PERF_MARKS=1` | Enable shell-side perf marks without Sysprof |
 | `SYSPROF_TRACE_FD` | Set automatically by Sysprof; enables mark emission |

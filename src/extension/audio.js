@@ -1,21 +1,6 @@
 import GLib from 'gi://GLib';
 import Gst from 'gi://Gst?version=1.0';
-import GstApp from 'gi://GstApp?version=1.0';
 
-const SPECTRUM_THRESHOLD_DB = -80;
-const SPECTRUM_THRESHOLD_DB_ABS = 80;
-const FEATURE_DECAY = 0.82;
-const FEATURE_SMOOTHING = 0.35;
-const SPECTRUM_BANDS = 24;
-const SPECTRUM_INTERVAL_NS = 50_000_000;
-const SPECTRUM_INTERVAL_MS = SPECTRUM_INTERVAL_NS / 1_000_000;
-const BEAT_HISTORY_SIZE = Math.max(5, Math.ceil(1000 / SPECTRUM_INTERVAL_MS));
-const BEAT_COOLDOWN_FRAMES = Math.max(1, Math.ceil(100 / SPECTRUM_INTERVAL_MS));
-const BEAT_WARMUP_FRAMES = 5;
-const BEAT_NOISE_FLOOR = 0.001;
-const BEAT_THRESHOLD_LOW = 1.2;
-const BEAT_THRESHOLD_HIGH = 1.55;
-const BEAT_THRESHOLD_VARIANCE_SLOPE = -15;
 const SIGNAL_TIMEOUT_USEC = 750_000;
 const DEFAULT_PULSE_MONITOR = '@DEFAULT_MONITOR@';
 const DEFAULT_MAX_PIPELINE_RESTARTS = 3;
@@ -25,11 +10,9 @@ const DEFAULT_SOURCE_REPROBE_DELAY_MSEC = 2500;
 const MIN_SOURCE_REPROBE_DELAY_MSEC = 250;
 const MAX_REPROBE_DELAY_MSEC = 60_000;
 const MAX_REPROBE_FAILURES = 10;
-const PARSER_ERROR_LOG_INTERVAL = 120;
 const BUS_POLL_MAX_MESSAGES = 20;
 const SETTINGS_DEBOUNCE_MSEC = 500;
 const PCM_SAMPLES = 576;
-const SNAPSHOT_INTERVAL_USEC = 5_000_000;
 const STUB_SOURCE = {source: 'stub', element: 'audiotestsrc wave=silence is-live=true'};
 const PIPELINE_KEYS = new Set(['audio-source', 'audio-restart-max-attempts', 'audio-reprobe-delay-ms']);
 
@@ -42,33 +25,6 @@ function ensureGstInit() {
     }
 }
 
-function clamp01(v) {
-    return v < 0 ? 0 : v > 1 ? 1 : v;
-}
-
-// Converts a normalised [0,1] spectrum value back to linear amplitude.
-function normToLinear(n) {
-    return n <= 0 ? 0 : Math.pow(10, (n * SPECTRUM_THRESHOLD_DB_ABS + SPECTRUM_THRESHOLD_DB) / 20);
-}
-
-// Normalise a dB value into [0,1] clamped range.
-function normDb(value) {
-    if (!Number.isFinite(value))
-        return 0;
-    const n = (value - SPECTRUM_THRESHOLD_DB) / SPECTRUM_THRESHOLD_DB_ABS;
-    return n < 0 ? 0 : n > 1 ? 1 : n;
-}
-
-function avgSlice(values, start, end) {
-    if (!values || end <= start)
-        return 0;
-    const safeEnd = end > values.length ? values.length : end;
-    let sum = 0;
-    for (let i = start; i < safeEnd; i++)
-        sum += values[i];
-    return safeEnd > start ? sum / (safeEnd - start) : 0;
-}
-
 function escapePipeline(value) {
     return `${value ?? ''}`.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
 }
@@ -78,11 +34,6 @@ function clearGSource(id) {
     if (id)
         GLib.source_remove(id);
     return 0;
-}
-
-// Throttled error counter — returns true when the message should be logged.
-function shouldLogError(count) {
-    return count === 1 || count % PARSER_ERROR_LOG_INTERVAL === 0;
 }
 
 function gstTupleOrScalar(value, scalarOk) {
@@ -105,27 +56,13 @@ export class AudioEngine {
         this._restartTimeoutId = 0;
         this._reprobeTimeoutId = 0;
         this._settingsDebounceId = 0;
-        this._noSpectrumWarnId = 0;
         this._appsinkPollId = 0;
         this._restartAttempts = 0;
         this._restartWindowStartUsec = 0;
         this._totalReprobeFailures = 0;
         this._activeSource = 'stub';
         this._lastUpdateUsec = 0;
-        this._spectrumCount = 0;
-        this._spectrumEmptyCount = 0;
-        this._lastSnapshotUsec = 0;
-        this._parserErrors = 0;
-        this._variantErrors = 0;
-        this._loggedNonSpectrumElement = false;
         this._notifiedKeys = new Set();
-
-        // Beat detection ring buffers — Float64Array avoids boxing overhead
-        this._energyHist = new Float64Array(BEAT_HISTORY_SIZE);
-        this._bassHist = new Float64Array(BEAT_HISTORY_SIZE);
-        this._histCount = 0;
-        this._histWrite = 0;
-        this._beatCooldown = 0;
 
         this._features = this._defaultFeatures('stub');
     }
@@ -140,13 +77,7 @@ export class AudioEngine {
     }
 
     disable() {
-        if (this._log.info)
-            this._log.info(`milkdrop audio disabling after ${this._spectrumCount} spectrum messages`);
         this._enabled = false;
-        this._spectrumCount = 0;
-        this._spectrumEmptyCount = 0;
-        this._lastSnapshotUsec = 0;
-        this._resetBeat();
         this._stopPipeline();
         this._features = this._defaultFeatures(this._features.source);
         this._notifiedKeys.clear();
@@ -174,26 +105,11 @@ export class AudioEngine {
     }
 
     getFeatures() {
-        const s = Math.max(0.1, this._getSetting('double', 'audio-sensitivity', 1.0));
         const active = this._enabled && this._hasRecentSignal();
-        if (!active && this._histCount > 0)
-            this._resetBeat();
-
         const f = this._features;
-        const s07 = s * 0.7;
         return {
             source: f.source,
             active,
-            energy: clamp01(f.energy * s),
-            bass: clamp01(f.bass * s),
-            mid: clamp01(f.mid * s),
-            high: clamp01(f.high * s),
-            treb: clamp01(f.high * s),
-            bass_att: clamp01(f.bass * s07),
-            mid_att: clamp01(f.mid * s07),
-            treb_att: clamp01(f.high * s07),
-            beat: active ? clamp01(f.beat) : 0,
-            decay: clamp01(f.decay * s),
             pcmLeft: f.pcmLeft,
             pcmRight: f.pcmRight,
         };
@@ -254,7 +170,6 @@ export class AudioEngine {
                 this._appsink = pipeline.get_by_name('waveform_appsink');
                 if (this._appsink)
                     this._startAppsinkPoll();
-                this._loggedNonSpectrumElement = false;
                 this._activeSource = c.source;
                 this._features.source = c.source;
                 this._features.active = false;
@@ -265,22 +180,9 @@ export class AudioEngine {
                     this._scheduleReprobe();
                 } else {
                     this._clearReprobe();
-                    this._spectrumCount = 0;
-                    this._spectrumEmptyCount = 0;
                 }
 
                 this._attachBus();
-                this._noSpectrumWarnId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 2, () => {
-                    this._noSpectrumWarnId = 0;
-                    if (!this._enabled)
-                        return GLib.SOURCE_REMOVE;
-                        if (this._log.warn)
-                        this._log.warn(`milkdrop audio: 2s check — pipeline=${!!this._pipeline} spectrumCount=${this._spectrumCount}`);
-                    if (this._pipeline && this._spectrumCount === 0)
-                                if (this._log.warn)
-                            this._log.warn('milkdrop audio: no spectrum messages received after 2s');
-                    return GLib.SOURCE_REMOVE;
-                });
                 return;
             } catch (e) {
                 if (this._log.warn)
@@ -299,7 +201,6 @@ export class AudioEngine {
     }
 
     _stopPipeline() {
-        this._noSpectrumWarnId = clearGSource(this._noSpectrumWarnId);
         this._stopAppsinkPoll();
         this._detachBus();
         this._restartTimeoutId = clearGSource(this._restartTimeoutId);
@@ -311,15 +212,10 @@ export class AudioEngine {
         this._bus = null;
         this._appsink = null;
         this._lastUpdateUsec = 0;
-        this._resetBeat();
     }
 
     _pipelineDesc(srcElement) {
-        return `${srcElement} ! queue leaky=downstream max-size-buffers=2 ! audioconvert ! audioresample ! tee name=t ! queue leaky=downstream max-size-buffers=2 ! spectrum bands=${SPECTRUM_BANDS} threshold=${SPECTRUM_THRESHOLD_DB} post-messages=true interval=${SPECTRUM_INTERVAL_NS} ! fakesink sync=false t. ! queue leaky=downstream max-size-buffers=2 ! audioconvert ! audioresample ! appsink name=waveform_appsink emit-signals=false sync=false max-buffers=2 drop=true`;
-    }
-
-    _schedulePipelineRestart(reason) {
-        this._scheduleRestart(reason);
+        return `${srcElement} ! queue leaky=downstream max-size-buffers=2 ! audioconvert ! audioresample ! appsink name=waveform_appsink emit-signals=false sync=false max-buffers=2 drop=true`;
     }
 
     _scheduleRestart(reason) {
@@ -513,28 +409,14 @@ export class AudioEngine {
 
     _onBusMessage(message) {
         switch (message.type) {
-        case Gst.MessageType.ELEMENT: {
-            const st = message.get_structure();
-            if (!st || st.get_name() !== 'spectrum') {
-                if (!this._loggedNonSpectrumElement) {
-                    this._loggedNonSpectrumElement = true;
-                        if (this._log.warn)
-                        this._log.warn(`milkdrop audio: unexpected ELEMENT name="${st?.get_name() ?? 'null'}"`);
-                }
-                break;
-            }
-            this._onSpectrum(st);
-            break;
-        }
         case Gst.MessageType.ERROR: {
             const [err, dbg] = message.parse_error();
             const msg = err?.message ?? 'unknown';
             if (this._log.warn)
                 this._log.warn(`milkdrop audio bus error: ${msg}${dbg ? ` debug=${dbg}` : ''}`);
-            this._resetBeat();
             this._features = this._defaultFeatures(this._activeSource || 'stub');
             this._lastUpdateUsec = 0;
-            this._schedulePipelineRestart(dbg ? `${msg} (${dbg})` : msg);
+            this._scheduleRestart(dbg ? `${msg} (${dbg})` : msg);
             break;
         }
         case Gst.MessageType.STATE_CHANGED:
@@ -547,198 +429,6 @@ export class AudioEngine {
         default:
             break;
         }
-    }
-
-    // ── Spectrum processing (hot path) ──────────────────────────
-
-    _summarizeSpectrumBands(bands) {
-        const len = bands.length;
-        const third = Math.max(1, (len / 3) | 0);
-        let eSum = 0;
-        for (let i = 0; i < len; i++)
-            eSum += bands[i];
-        return {
-            len,
-            bass: avgSlice(bands, 0, third),
-            mid: avgSlice(bands, third, third * 2),
-            high: avgSlice(bands, third * 2, len),
-            energy: eSum / len,
-        };
-    }
-
-    _nextBeatValue(linE, linB) {
-        if (this._beatCooldown > 0) {
-            this._beatCooldown -= 1;
-            return 0;
-        }
-        if (this._histCount >= BEAT_WARMUP_FRAMES)
-            return this._detectBeat(linE, linB);
-        return 0;
-    }
-
-    _logFirstSpectrum(structure, len) {
-        this._restartAttempts = 0;
-        this._restartWindowStartUsec = 0;
-        this._totalReprobeFailures = 0;
-        const src = this._activeSource || 'stub';
-        if (this._log.warn)
-            this._log.warn(`milkdrop audio first spectrum source=${src} bands=${len}`);
-        const raw = structure.to_string?.() ?? '';
-        if (this._log.warn)
-            this._log.warn(`milkdrop audio first spectrum raw (300): ${raw.slice(0, 300)}`);
-    }
-
-    _onSpectrum(structure) {
-        if (!this._enabled)
-            return;
-
-        const bands = this._parseMagnitude(structure);
-        if (!bands) {
-            this._spectrumEmptyCount += 1;
-            if (this._spectrumEmptyCount === 1 || this._spectrumEmptyCount % 60 === 0)
-                if (this._log.info)
-                    this._log.info(`milkdrop audio spectrum empty count=${this._spectrumEmptyCount}`);
-            return;
-        }
-
-        const now = GLib.get_monotonic_time();
-        if (this._lastUpdateUsec && now - this._lastUpdateUsec >= SIGNAL_TIMEOUT_USEC)
-            this._resetBeat();
-
-        const {len, bass, mid, high, energy} = this._summarizeSpectrumBands(bands);
-
-        // Linear amplitude for beat detection
-        const linE = normToLinear(energy);
-        const linB = normToLinear(bass);
-        this._pushHist(linE, linB);
-
-        const beat = this._nextBeatValue(linE, linB);
-
-        const f = this._features;
-        const decay = energy > f.decay * FEATURE_DECAY ? energy : f.decay * FEATURE_DECAY;
-
-        this._spectrumCount += 1;
-
-        // First spectrum: confirm audio is real, reset budgets
-        if (this._spectrumCount === 1)
-            this._logFirstSpectrum(structure, len);
-
-        // Periodic snapshot
-        if (now - this._lastSnapshotUsec >= SNAPSHOT_INTERVAL_USEC) {
-            this._lastSnapshotUsec = now;
-            if (this._log.debug)
-                this._log.debug(`milkdrop audio #${this._spectrumCount} E=${energy.toFixed(3)} B=${bass.toFixed(3)} M=${mid.toFixed(3)} H=${high.toFixed(3)} beat=${beat}`);
-        }
-
-        // Smoothed feature update (mutate in place — no object spread on hot path)
-        const sm = FEATURE_SMOOTHING;
-        f.source = this._activeSource || 'stub';
-        f.active = true;
-        f.energy += (energy - f.energy) * sm;
-        f.bass += (bass - f.bass) * sm;
-        f.mid += (mid - f.mid) * sm;
-        f.high += (high - f.high) * sm;
-        f.beat = beat;
-        f.decay = decay;
-        this._lastUpdateUsec = now;
-
-        // Debug sample every 50 frames
-        if (this._spectrumCount % 50 === 0) {
-            const out = this.getFeatures();
-            if (this._log.warn)
-                this._log.warn(
-                    `milkdrop audio #${this._spectrumCount} raw E=${energy.toFixed(3)} B=${bass.toFixed(3)} M=${mid.toFixed(3)} H=${high.toFixed(3)} → out E=${out.energy.toFixed(3)} B=${out.bass.toFixed(3)} M=${out.mid.toFixed(3)} H=${out.high.toFixed(3)}`
-                );
-        }
-
-        // Beat debug logging (restored from Version 1)
-        if (beat && GLib.getenv('MILKDROP_DEBUG_BEAT') === '1') {
-            if (this._log.warn)
-                this._log.warn(`milkdrop beat #${this._spectrumCount} detected`);
-        }
-    }
-
-    // ── Beat detection ──────────────────────────────────────────
-
-    _detectBeat(linE, linB) {
-        const avgE = this._avgHist(this._energyHist);
-        const avgB = this._avgHist(this._bassHist);
-        if (avgE <= BEAT_NOISE_FLOOR && avgB <= BEAT_NOISE_FLOOR)
-            return 0;
-
-        const varE = this._varHist(this._energyHist, avgE);
-        const varB = this._varHist(this._bassHist, avgB);
-        const cvE = avgE > 0 ? varE / (avgE * avgE) : 0;
-        const cvB = avgB > 0 ? varB / (avgB * avgB) : 0;
-
-        const thE = Math.max(BEAT_THRESHOLD_LOW, Math.min(BEAT_THRESHOLD_HIGH, BEAT_THRESHOLD_VARIANCE_SLOPE * cvE + BEAT_THRESHOLD_HIGH));
-        const thB = Math.max(BEAT_THRESHOLD_LOW, Math.min(BEAT_THRESHOLD_HIGH, BEAT_THRESHOLD_VARIANCE_SLOPE * cvB + BEAT_THRESHOLD_HIGH));
-
-        const eBeat = (linE - BEAT_NOISE_FLOOR) > thE * avgE && avgE > BEAT_NOISE_FLOOR;
-        const bBeat = (linB - BEAT_NOISE_FLOOR) > thB * avgB && avgB > BEAT_NOISE_FLOOR;
-
-        // Debug logging for beat detection analysis
-        if (GLib.getenv('MILKDROP_DEBUG_BEAT') === '1') {
-            const debugBeat = eBeat || bBeat;
-            if (debugBeat || this._spectrumCount % 20 === 0) {
-                if (this._log.warn)
-                    this._log.warn(
-                        `milkdrop beat debug #${this._spectrumCount}: ` +
-                        `linE=${linE.toFixed(6)} linB=${linB.toFixed(6)} ` +
-                        `avgE=${avgE.toFixed(6)} avgB=${avgB.toFixed(6)} ` +
-                        `cvE=${cvE.toFixed(4)} cvB=${cvB.toFixed(4)} ` +
-                        `thE=${thE.toFixed(3)} thB=${thB.toFixed(3)} ` +
-                        `eBeat=${eBeat} bBeat=${bBeat}`
-                    );
-            }
-        }
-
-        if (eBeat || bBeat) {
-            this._beatCooldown = BEAT_COOLDOWN_FRAMES;
-            if (this._log.info)
-                this._log.info(`milkdrop beat #${this._spectrumCount} (energy=${eBeat} bass=${bBeat})`);
-            return 1;
-        }
-        return 0;
-    }
-
-    _pushHist(energy, bass) {
-        this._energyHist[this._histWrite] = energy;
-        this._bassHist[this._histWrite] = bass;
-        this._histWrite = (this._histWrite + 1) % BEAT_HISTORY_SIZE;
-        if (this._histCount < BEAT_HISTORY_SIZE)
-            this._histCount += 1;
-    }
-
-    _avgHist(buf) {
-        const n = this._histCount;
-        if (n === 0) return 0;
-        let sum = 0;
-        const base = (this._histWrite - n + BEAT_HISTORY_SIZE) % BEAT_HISTORY_SIZE;
-        for (let i = 0; i < n; i++)
-            sum += buf[(base + i) % BEAT_HISTORY_SIZE];
-        return sum / n;
-    }
-
-    _varHist(buf, mean) {
-        const n = this._histCount;
-        if (n === 0) return 0;
-        let sum = 0;
-        const base = (this._histWrite - n + BEAT_HISTORY_SIZE) % BEAT_HISTORY_SIZE;
-        for (let i = 0; i < n; i++) {
-            const d = buf[(base + i) % BEAT_HISTORY_SIZE] - mean;
-            sum += d * d;
-        }
-        return sum / n;
-    }
-
-    _resetBeat() {
-        this._energyHist.fill(0);
-        this._bassHist.fill(0);
-        this._histCount = 0;
-        this._histWrite = 0;
-        this._beatCooldown = 0;
-        this._features.beat = 0;
     }
 
     // ── Appsink PCM waveform ────────────────────────────────────
@@ -808,145 +498,13 @@ export class AudioEngine {
                     right[i] = Number.isFinite(rv) ? rv : 0;
                 }
             }
+
+            // Mark signal received
+            this._lastUpdateUsec = GLib.get_monotonic_time();
+            this._features.active = true;
         } finally {
             buffer.unmap(map);
         }
-    }
-
-    // ── Spectrum magnitude parsing ──────────────────────────────
-
-    _parseMagnitude(structure) {
-        try {
-            // Strategy 1: get_list (modern GJS)
-            if (typeof structure.get_list === 'function') {
-                const result = structure.get_list('magnitude');
-                if (result?.[0] === true && result[1]?.n_values > 0)
-                    return this._channelsToNorm(this._readValueArray(result[1]));
-            }
-
-            // Strategy 2: get_array (older GJS)
-            if (typeof structure.get_array === 'function') {
-                let arr = structure.get_array('magnitude');
-                if (Array.isArray(arr) && arr.length === 2 && typeof arr[0] === 'boolean')
-                    arr = arr[0] ? arr[1] : null;
-                if (arr?.length > 0)
-                    return this._channelsToNorm(Array.from(arr).map(v => this._readVariant(v)).filter(a => a.length > 0));
-            }
-
-            // Strategy 3: get_value (GVariant)
-            const val = structure.get_value?.('magnitude');
-            if (val && typeof val.n_children === 'function') {
-                const channels = [];
-                for (let i = 0, n = val.n_children(); i < n; i++) {
-                    const child = val.get_child(i);
-                    if (child !== null) {
-                        const floats = this._readVariant(child);
-                        if (floats.length > 0)
-                            channels.push(floats);
-                    }
-                }
-                return channels.length > 0 ? this._mergeAndNorm(channels) : null;
-            }
-        } catch (e) {
-            this._parserErrors += 1;
-            if (shouldLogError(this._parserErrors))
-                if (this._log.debug)
-                    this._log.debug(`milkdrop audio structured parser error #${this._parserErrors}: ${e.message}`);
-        }
-        return null;
-    }
-
-    // Read a GLib.ValueArray, detecting nested (multi-channel) vs flat layout.
-    _readValueArray(valArray) {
-        const first = valArray.get_nth(0);
-        if (first && typeof first.get_nth === 'function') {
-            const channels = [];
-            for (let i = 0; i < valArray.n_values; i++) {
-                const ch = this._extractFloats(valArray.get_nth(i));
-                if (ch.length > 0) channels.push(ch);
-            }
-            return channels;
-        }
-        const flat = this._extractFloats(valArray);
-        return flat.length > 0 ? [flat] : [];
-    }
-
-    _extractFloats(valArray) {
-        const out = [];
-        if (!valArray?.n_values) return out;
-        for (let i = 0; i < valArray.n_values; i++) {
-            try {
-                const v = Number(valArray.get_nth(i));
-                if (Number.isFinite(v)) out.push(v);
-            } catch (e) {
-                this._variantErrors += 1;
-                if (shouldLogError(this._variantErrors))
-                        if (this._log.debug)
-                        this._log.debug(`milkdrop audio value_array error #${this._variantErrors}: ${e.message}`);
-            }
-        }
-        return out;
-    }
-
-    _readVariant(variant) {
-        const out = [];
-        try {
-            if (typeof variant?.n_children === 'function') {
-                const n = variant.n_children();
-                const get = typeof variant.get_child_value === 'function'
-                    ? i => variant.get_child_value(i)
-                    : i => variant.get_child(i);
-                for (let i = 0; i < n; i++) {
-                    try {
-                        const c = get.call(variant, i);
-                        if (c != null) {
-                            const v = Number(typeof c.get_double === 'function' ? c.get_double() : c);
-                            if (Number.isFinite(v)) out.push(v);
-                        }
-                    } catch (e) {
-                        this._variantErrors += 1;
-                        if (shouldLogError(this._variantErrors))
-                                        if (this._log.debug)
-                                this._log.debug(`milkdrop audio variant child error #${this._variantErrors}: ${e.message}`);
-                    }
-                }
-                return out;
-            }
-            if (Array.isArray(variant))
-                return variant.map(v => Number(v)).filter(Number.isFinite);
-            const v = Number(variant?.get_double?.() ?? variant);
-            if (Number.isFinite(v)) out.push(v);
-        } catch (e) {
-            this._variantErrors += 1;
-            if (shouldLogError(this._variantErrors))
-                if (this._log.debug)
-                    this._log.debug(`milkdrop audio variant parser error #${this._variantErrors}: ${e.message}`);
-        }
-        return out;
-    }
-
-    // Convert parsed channel bands → normalised merged output (or null).
-    _channelsToNorm(channels) {
-        if (!channels || channels.length === 0) return [];  // Return [] not null for empty
-        if (channels.length > 1 && channels.some(c => c.length > 1))
-            return this._mergeAndNorm(channels);
-        if (channels.length > 1)
-            return channels.map(c => normDb(c[0])).filter(Number.isFinite);
-        return channels[0].map(normDb).filter(Number.isFinite);
-    }
-
-    _mergeAndNorm(channels) {
-        const len = Math.min(...channels.map(c => c.length));
-        if (len === 0) return [];
-        const out = new Array(len);
-        for (let i = 0; i < len; i++) {
-            let sum = 0, n = 0;
-            for (const ch of channels) {
-                if (Number.isFinite(ch[i])) { sum += ch[i]; n += 1; }
-            }
-            out[i] = normDb(n > 0 ? sum / n : 0);
-        }
-        return out;
     }
 
     // ── Reprobe logic ───────────────────────────────────────────
@@ -998,8 +556,6 @@ export class AudioEngine {
         return {
             source,
             active: false,
-            energy: 0, bass: 0, mid: 0, high: 0,
-            beat: 0, decay: 0,
             pcmLeft: new Float32Array(PCM_SAMPLES),
             pcmRight: new Float32Array(PCM_SAMPLES),
         };

@@ -47,7 +47,6 @@ async function main() {
     await runTest('extension/presets', './extension/presets.test.js');
     await runTest('extension/settings-contract', './extension/settings-contract.test.js');
     await runTest('extension/frame-state-contract', './extension/frame-state-contract.test.js');
-    await runTest('extension/audio', './extension/audio.test.js');
     await runTest('extension/audio-pcm-contract', './extension/audio-pcm-contract.test.js');
     await runTest('extension/preset-ipc-contract', './extension/preset-ipc-contract.test.js');
     await runTest('extension/preset-crash-quarantine', './extension/preset-crash-quarantine.test.js');

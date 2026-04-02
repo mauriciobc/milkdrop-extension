@@ -45,7 +45,7 @@ export function run(assert) {
             },
         };
         e.loadPreset(preset);
-        const out = e.evaluateFrame({ t: 10, audio: { energy: 0.5, bass: 0.2 }, monitor: 1 });
+        const out = e.evaluateFrame({ t: 10, audio: { pcmLeft: new Float32Array(576), pcmRight: new Float32Array(576) }, monitor: 1 });
         assert(out.zoom === 2.0, 'evaluateFrame zoom from preset');
         assert(out.rot === 0.1, 'evaluateFrame rot from preset');
         assert(out.dx === 0.05, 'evaluateFrame dx from preset');
@@ -54,8 +54,8 @@ export function run(assert) {
         assert(out.presetId === 'p1', 'evaluateFrame presetId');
         assert(out.presetName === 'Preset1', 'evaluateFrame presetName');
         assert(out.t === 10, 'evaluateFrame t is forwarded from frameState');
-        assert(out.audio.energy === 0.5, 'evaluateFrame audio.energy');
-        assert(out.audio.bass === 0.2, 'evaluateFrame audio.bass');
+        assert(out.audio.pcmLeft !== undefined, 'evaluateFrame audio.pcmLeft');
+        assert(out.audio.pcmRight !== undefined, 'evaluateFrame audio.pcmRight');
         assert(out.blendProgress === 1, 'evaluateFrame no blend so blendProgress 1');
     }
 
@@ -68,52 +68,29 @@ export function run(assert) {
         assert(out.presetName === null, 'null preset presetName default');
     }
 
-    // expression path receives energy and attenuated bands
+    // expression path receives audio context (no longer computes bands)
     {
         const e = new Evaluator();
         e.loadPreset({
             id: 'expr:audio-inputs',
             name: 'Expr Audio Inputs',
             baseVals: { zoom: 1, decay: 0.98 },
-            frame_eqs: 'zoom = 1 + energy; decay = bass_att;',
-        });
-
-        const derived = e.evaluateFrame({
-            t: 0,
-            frame: 1,
-            audio: { energy: 0.4, bass: 0.5, mid: 0.25, high: 0.1 },
-        });
-        assert(Math.abs(derived.zoom - 1.4) < 1e-9, 'expression path maps energy into context');
-        assert(Math.abs(derived.decay - 0.35) < 1e-9, 'expression path derives bass_att from bass when missing');
-
-        const explicit = e.evaluateFrame({
-            t: 0,
-            frame: 2,
-            audio: { energy: 0.4, bass: 0.5, bass_att: 0.9 },
-        });
-        assert(Math.abs(explicit.decay - 0.9) < 1e-9, 'expression path uses explicit bass_att when provided');
-    }
-
-    // expression path accepts treb alias and normalizes it to high in output audio.
-    {
-        const e = new Evaluator();
-        e.loadPreset({
-            id: 'expr:treb-alias',
-            name: 'Expr Treb Alias',
-            baseVals: { zoom: 1, decay: 0.98 },
-            frame_eqs: 'zoom = 1 + treb; decay = treb_att;',
+            frame_eqs: 'zoom = 1 + time; decay = 0.9;',
         });
 
         const out = e.evaluateFrame({
             t: 0,
             frame: 1,
-            audio: { treb: 0.3 },
+            audio: { pcmLeft: new Float32Array(576), pcmRight: new Float32Array(576) },
         });
+        assert(Math.abs(out.zoom - 1) < 1e-9, 'expression path evaluates frame_eqs');
 
-        assert(Math.abs(out.zoom - 1.3) < 1e-9, 'expression path accepts treb as a high-band alias');
-        assert(Math.abs(out.decay - 0.21) < 1e-9, 'expression path derives treb_att from normalized high alias');
-        assert(out.audio.high === 0.3, 'evaluateFrame normalizes incoming treb to high in output audio');
-        assert(out.audio.high === 0.3, 'evaluateFrame output audio exposes normalized high value from treb alias');
+        const out2 = e.evaluateFrame({
+            t: 1,
+            frame: 2,
+            audio: { pcmLeft: new Float32Array(576), pcmRight: new Float32Array(576) },
+        });
+        assert(Math.abs(out2.zoom - 2) < 1e-9, 'expression path uses time variable');
     }
 
     // expression path exposes renderer-facing MilkDrop controls needed by downstream passes.
@@ -205,16 +182,16 @@ export function run(assert) {
     // _evaluateWave: no spec returns fallback
     {
         const e = new Evaluator();
-        const v = e._evaluateWave(null, 0, 0, 1.5, 0);
+        const v = e._evaluateWave(null, 0, 0, 1.5);
         assert(v === 1.5, '_evaluateWave null spec returns fallback');
     }
 
-    // _evaluateWave: spec with sin, base, amplitude, frequency, audioScale
+    // _evaluateWave: spec with sin, base, amplitude, frequency
     {
         const e = new Evaluator();
-        const spec = { base: 10, amplitude: 2, frequency: 0, waveform: 'sin', audioScale: 0.5 };
-        const v = e._evaluateWave(spec, 0, 0, 0, 4);
-        assert(v === 10 + 4 * 0.5, '_evaluateWave base + audioScale*audioValue');
+        const spec = { base: 10, amplitude: 2, frequency: 0.5, waveform: 'sin' };
+        const v = e._evaluateWave(spec, 0, 0, 0);
+        assert(v === 10, '_evaluateWave base at time=0');
     }
 
     // _smoothstep: 0->0, 1->1, 0.5->0.5

@@ -115,7 +115,6 @@ export default class MilkdropPreferences extends ExtensionPreferences {
         });
         audioPage.add(audioGroup);
 
-        addSpinRow(audioGroup, settings, 'audio-sensitivity', _('Audio sensitivity'), _('Multiplier applied to audio-derived values.'), new Gtk.Adjustment({lower: 0.1, upper: 3.0, step_increment: 0.1, page_increment: 0.5, value: 1.0}));
         addEntryRow(audioGroup, settings, 'audio-source', _('Audio source'), _('Output monitor source name (for example alsa_output...monitor) or auto (never microphone fallback).'));
         addSpinRow(audioGroup, settings, 'audio-restart-max-attempts', _('Audio restart max attempts'), _('Applies after audio pipeline restart/reprobe.'), new Gtk.Adjustment({lower: 0, upper: 100, step_increment: 1, page_increment: 5, value: 3}));
         addSpinRow(audioGroup, settings, 'audio-reprobe-delay-ms', _('Audio reprobe delay (ms)'), _('Applies after audio pipeline restart/reprobe.'), new Gtk.Adjustment({lower: 250, upper: 120000, step_increment: 50, page_increment: 500, value: 2500}));

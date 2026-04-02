@@ -12,10 +12,10 @@ const BOOTSTRAP_PRESET = {
     description: 'Time-driven preset used to bootstrap the renderer protocol.',
     source: 'bootstrap',
     frame: {
-        zoom: { base: 1.0, amplitude: 0.02, frequency: 0.5, monitorPhase: 0.2, waveform: 'sin', audioScale: 0.15 },
-        rot: { base: 0.0, amplitude: 0.012, frequency: 0.25, monitorPhase: 0.15, waveform: 'sin', audioScale: 0.06 },
-        dx: { base: 0.0, amplitude: 0.01, frequency: 0.3, waveform: 'sin', audioScale: 0.04 },
-        dy: { base: 0.0, amplitude: 0.01, frequency: 0.2, waveform: 'cos', audioScale: 0.04 },
+        zoom: { base: 1.0, amplitude: 0.02, frequency: 0.5, monitorPhase: 0.2, waveform: 'sin' },
+        rot: { base: 0.0, amplitude: 0.012, frequency: 0.25, monitorPhase: 0.15, waveform: 'sin' },
+        dx: { base: 0.0, amplitude: 0.01, frequency: 0.3, waveform: 'sin' },
+        dy: { base: 0.0, amplitude: 0.01, frequency: 0.2, waveform: 'cos' },
         decay: { base: 0.97, amplitude: 0.0, frequency: 0.0, waveform: 'sin' },
     },
     vertex: {
@@ -93,11 +93,10 @@ function sanitiseWaveSpec(raw, fallback) {
         monitorPhase: sanitiseNumber(raw.monitorPhase, fallback.monitorPhase ?? 0),
         phase: sanitiseNumber(raw.phase, fallback.phase ?? 0),
         waveform: VALID_WAVEFORMS.has(raw.waveform) ? raw.waveform : (fallback.waveform ?? 'sin'),
-        audioScale: sanitiseNumber(raw.audioScale, fallback.audioScale ?? 0),
     };
 }
 
-const DEFAULT_WAVE = { base: 0, amplitude: 0, frequency: 0, monitorPhase: 0, phase: 0, waveform: 'sin', audioScale: 0 };
+const DEFAULT_WAVE = { base: 0, amplitude: 0, frequency: 0, monitorPhase: 0, phase: 0, waveform: 'sin' };
 const DEFAULT_ZOOM_WAVE = { ...DEFAULT_WAVE, base: 1.0 };
 const DEFAULT_DECAY_WAVE = { ...DEFAULT_WAVE, base: 0.98 };
 

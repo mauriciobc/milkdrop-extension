@@ -71,19 +71,6 @@ function isExpressionPreset(preset) {
                       typeof preset.pixel_eqs === 'string');
 }
 
-function normalizeFrameAudio(incomingAudio) {
-    return {
-        energy: 0,
-        bass: 0,
-        mid: 0,
-        high: 0,
-        beat: 0,
-        decay: 0,
-        ...incomingAudio,
-        high: incomingAudio.high ?? incomingAudio.treb ?? 0,
-    };
-}
-
 export class Evaluator {
     constructor() {
         this._preset = null;
@@ -133,11 +120,8 @@ export class Evaluator {
 
         const blendProgress = this._getBlendProgress(time);
         const preset = this._preset;
-        const audio = normalizeFrameAudio(frameState.audio ?? {});
+        const audio = frameState.audio ?? {};
         const monitor = frameState.monitor ?? 0;
-        const bassAtt = audio.bass_att ?? (audio.bass * 0.7);
-        const midAtt = audio.mid_att ?? (audio.mid * 0.7);
-        const trebAtt = audio.treb_att ?? (audio.high * 0.7);
 
         // ── Expression-based preset path ──────────────────────────
         if (this._exprEval) {
@@ -146,15 +130,6 @@ export class Evaluator {
                 frame: frameState.frame ?? 0,
                 fps: frameState.fps ?? 30,
                 progress: frameState.progress ?? 0,
-                bass: audio.bass,
-                mid: audio.mid,
-                treb: audio.high,
-                high: audio.high,
-                bass_att: bassAtt,
-                mid_att: midAtt,
-                treb_att: trebAtt,
-                energy: audio.energy,
-                beat: audio.beat,
             });
 
             const {zoom, rot, dx, dy, decay} = this._blendExprMotion(ctx, blendProgress);
@@ -180,19 +155,19 @@ export class Evaluator {
         }
 
         // ── Legacy WaveSpec path ──────────────────────────────────
-        let zoom = this._evaluateWave(preset?.frame?.zoom, time, monitor, DEFAULT_ZOOM, audio.energy);
-        let rot = this._evaluateWave(preset?.frame?.rot, time, monitor, 0.0, audio.mid);
-        let dx = this._evaluateWave(preset?.frame?.dx, time, monitor, 0.0, audio.bass);
-        let dy = this._evaluateWave(preset?.frame?.dy, time, monitor, 0.0, audio.high);
-        let decay = this._evaluateWave(preset?.frame?.decay, time, monitor, DEFAULT_DECAY, audio.decay);
+        let zoom = this._evaluateWave(preset?.frame?.zoom, time, monitor, DEFAULT_ZOOM);
+        let rot = this._evaluateWave(preset?.frame?.rot, time, monitor, 0.0);
+        let dx = this._evaluateWave(preset?.frame?.dx, time, monitor, 0.0);
+        let dy = this._evaluateWave(preset?.frame?.dy, time, monitor, 0.0);
+        let decay = this._evaluateWave(preset?.frame?.decay, time, monitor, DEFAULT_DECAY);
 
         if (blendProgress < 1 && this._blendFrom) {
             const t = this._smoothstep(blendProgress);
-            const oldZoom = this._evaluateWave(this._blendFrom?.frame?.zoom, time, monitor, DEFAULT_ZOOM, audio.energy);
-            const oldRot = this._evaluateWave(this._blendFrom?.frame?.rot, time, monitor, 0.0, audio.mid);
-            const oldDx = this._evaluateWave(this._blendFrom?.frame?.dx, time, monitor, 0.0, audio.bass);
-            const oldDy = this._evaluateWave(this._blendFrom?.frame?.dy, time, monitor, 0.0, audio.high);
-            const oldDecay = this._evaluateWave(this._blendFrom?.frame?.decay, time, monitor, DEFAULT_DECAY, audio.decay);
+            const oldZoom = this._evaluateWave(this._blendFrom?.frame?.zoom, time, monitor, DEFAULT_ZOOM);
+            const oldRot = this._evaluateWave(this._blendFrom?.frame?.rot, time, monitor, 0.0);
+            const oldDx = this._evaluateWave(this._blendFrom?.frame?.dx, time, monitor, 0.0);
+            const oldDy = this._evaluateWave(this._blendFrom?.frame?.dy, time, monitor, 0.0);
+            const oldDecay = this._evaluateWave(this._blendFrom?.frame?.decay, time, monitor, DEFAULT_DECAY);
 
             zoom = oldZoom + (zoom - oldZoom) * t;
             rot = oldRot + (rot - oldRot) * t;
@@ -280,7 +255,7 @@ export class Evaluator {
         return t * t * (3 - 2 * t);
     }
 
-    _evaluateWave(spec, time, monitor, fallback, audioValue) {
+    _evaluateWave(spec, time, monitor, fallback) {
         if (!spec)
             return fallback;
 
@@ -293,8 +268,7 @@ export class Evaluator {
         const wave = spec.waveform === 'cos'
             ? Math.cos(waveformInput)
             : Math.sin(waveformInput);
-        const audioScale = spec.audioScale ?? 0;
 
-        return base + amplitude * wave + audioValue * audioScale;
+        return base + amplitude * wave;
     }
 }

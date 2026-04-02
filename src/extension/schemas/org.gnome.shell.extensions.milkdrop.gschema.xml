@@ -22,11 +22,6 @@
       <summary>Beat cuts enabled</summary>
       <description>Allow beat events to force preset changes.</description>
     </key>
-    <key name="audio-sensitivity" type="d">
-      <default>1.0</default>
-      <summary>Audio sensitivity</summary>
-      <description>Multiplier applied to audio-derived values.</description>
-    </key>
     <key name="show-on-empty-desktop-only" type="b">
       <default>false</default>
       <summary>Empty desktop only</summary>
