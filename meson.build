@@ -48,8 +48,6 @@ extension_sources = files(
 expr_sources = files(
   'src/extension/expr/compiler.js',
   'src/extension/expr/context.js',
-  'src/extension/expr/custom-shapes.js',
-  'src/extension/expr/custom-waves.js',
   'src/extension/expr/functions.js',
   'src/extension/expr/lexer.js',
   'src/extension/expr/parser.js',
