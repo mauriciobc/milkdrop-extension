@@ -2,6 +2,7 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GLibUnix from 'gi://GLibUnix';
 
+const GioUnix = typeof imports !== 'undefined' ? imports.gi?.GioUnix ?? null : null;
 const encoder = new TextEncoder();
 const SHM_READ_RETRY_BASE_MS = 5;
 const SHM_READ_RETRY_MAX_MS = 100;
@@ -34,6 +35,11 @@ function _copyAudioSamples(src, maxLen) {
             out[count++] = n;
     }
     return count === len ? out : out.slice(0, count);
+}
+
+function _newUnixInputStream(fd, closeFd = true) {
+    const InputStream = GioUnix?.InputStream ?? Gio.UnixInputStream;
+    return InputStream.new(fd, closeFd);
 }
 
 /**
@@ -549,7 +555,7 @@ export class GlBridge {
             if (typeof fd !== 'number' || fd < 0)
                 continue;
             try {
-                const stream = Gio.UnixInputStream.new(fd, true);
+                const stream = _newUnixInputStream(fd, true);
                 stream.close(null);
             } catch (_e) {
             }
@@ -913,7 +919,7 @@ export class GlBridge {
     _readFrameBytesAsync(fd, pixelCount, callback) {
         let stream = null;
         try {
-            stream = Gio.UnixInputStream.new(fd, true);
+            stream = _newUnixInputStream(fd, true);
             stream.read_bytes_async(pixelCount, GLib.PRIORITY_DEFAULT, this._cancellable, (input, result) => {
                 try {
                     const bytes = input.read_bytes_finish(result);

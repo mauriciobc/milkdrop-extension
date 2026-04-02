@@ -53,7 +53,7 @@ function _modulePathFromUrl(url) {
 
 function _isExecutedAsMain(importMetaUrl, programArgs) {
     const modulePath = _canonicalPath(_modulePathFromUrl(importMetaUrl));
-    const entryPath = _canonicalPath(programArgs?.[0]);
+    const entryPath = _canonicalPath(programArgs);
     return Boolean(modulePath && entryPath && modulePath === entryPath);
 }
 
@@ -555,14 +555,12 @@ function runBenchmark(options) {
     app.run([]);
 }
 
-const PROGRAM_ARGS = imports.system?.programArgs ?? [];
-const CLI_ARGS = PROGRAM_ARGS.length > 0
-    ? PROGRAM_ARGS.slice(1)
-    : (typeof ARGV !== 'undefined' ? ARGV : []);
+const PROGRAM_PATH = imports.system?.programPath ?? null;
+const CLI_ARGS = imports.system?.programArgs ?? (typeof ARGV !== 'undefined' ? ARGV : []);
 
 const _isMain = typeof import.meta.main === 'boolean'
     ? import.meta.main
-    : _isExecutedAsMain(import.meta.url, PROGRAM_ARGS);
+    : _isExecutedAsMain(import.meta.url, PROGRAM_PATH);
 
 if (_isMain) {
     const options = parseArgs(CLI_ARGS);
