@@ -1,5 +1,6 @@
 import GLib from 'gi://GLib';
 import Gst from 'gi://Gst?version=1.0';
+import GstApp from 'gi://GstApp?version=1.0';
 
 const SIGNAL_TIMEOUT_USEC = 750_000;
 const DEFAULT_PULSE_MONITOR = '@DEFAULT_MONITOR@';
@@ -49,6 +50,7 @@ export class AudioEngine {
         this._pipeline = null;
         this._bus = null;
         this._appsink = null;
+        this._appSink = null;
         this._busPollId = 0;
         this._busWatchId = 0;
         this._busSignalHandlerId = 0;
@@ -167,8 +169,9 @@ export class AudioEngine {
 
                 this._pipeline = pipeline;
                 this._bus = pipeline.get_bus();
-                this._appsink = pipeline.get_by_name('waveform_appsink');
-                if (this._appsink)
+                const appsinkElement = pipeline.get_by_name('waveform_appsink');
+                this._appSink = appsinkElement ? GstApp.AppSink.new(appsinkElement) : null;
+                if (this._appSink)
                     this._startAppsinkPoll();
                 this._activeSource = c.source;
                 this._features.source = c.source;
@@ -211,6 +214,7 @@ export class AudioEngine {
         this._pipeline = null;
         this._bus = null;
         this._appsink = null;
+        this._appSink = null;
         this._lastUpdateUsec = 0;
     }
 
@@ -437,14 +441,19 @@ export class AudioEngine {
         this._stopAppsinkPoll();
         if (!this._appsink || !this._enabled)
             return;
+        const appSink = GstApp.AppSink.new(null);
         this._appsinkPollId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 20, () => {
             if (!this._enabled || !this._appsink) {
                 this._appsinkPollId = 0;
                 return GLib.SOURCE_REMOVE;
             }
-            const sample = this._appsink.try_pull_sample(0);
-            if (sample)
-                this._readPcm(sample);
+            try {
+                const sample = appSink.try_pull_sample(0);
+                if (sample)
+                    this._readPcm(sample);
+            } catch (e) {
+                // Ignore pull errors
+            }
             return GLib.SOURCE_CONTINUE;
         });
     }
