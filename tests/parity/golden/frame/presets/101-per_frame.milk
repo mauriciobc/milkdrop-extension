@@ -1,0 +1,6 @@
+[preset00]
+fDecay=0.97
+fZoom=1.0
+fRot=0.0
+per_frame_1=zoom=zoom+0.01;
+per_frame_2=rot=rot+0.005;

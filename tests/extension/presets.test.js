@@ -1,70 +1,161 @@
-import {PresetStore} from '../../src/extension/presets.js';
+import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
+
+import {PresetStore, validatePresetExpressions} from '../../src/extension/presets.js';
 
 export async function run(assert) {
     const store = new PresetStore();
 
     {
         const index = await store.loadIndex();
-        const ids = new Set(index.map(entry => entry.id));
-        const expected = [
-            'builtin:demo-wave',
-            'builtin:angular-drift',
-            'builtin:wave-pool',
-            'builtin:fractal-bloom',
-            'builtin:hypnotic-tunnel',
-            'builtin:particle-comet',
-            'builtin:supernova-kick',
-            'builtin:waveform-lattice',
-        ];
-
-        for (const id of expected)
-            assert(ids.has(id), `loadIndex includes ${id}`);
+        assert(Array.isArray(index), 'loadIndex returns array');
+        assert(index.length === 0, 'loadIndex is empty when preset-directory is not configured');
     }
 
     {
-        const preset = await store.loadPreset('builtin:fractal-bloom');
-        assert(preset.id === 'builtin:fractal-bloom', 'fractal-bloom preset has correct id');
-        assert(!preset.shaders, 'fractal-bloom has no shaders configured');
+        const tempDir = GLib.dir_make_tmp('milkdrop-expr-presets-XXXXXX');
+        const presetPath = GLib.build_filenamev([tempDir, 'external-test.milk']);
+        const milkText =
+            '[preset00]\n' +
+            'fZoom=1.01\n' +
+            'fRot=0.02\n' +
+            'per_frame_1=zoom=zoom+energy*0.1;\n' +
+            'per_pixel_1=dx=rad*0.01;\n';
+        GLib.file_set_contents(presetPath, milkText);
+
+        const settings = {
+            settings_schema: {
+                has_key: key => key === 'preset-directory',
+            },
+            get_string: () => tempDir,
+        };
+
+        try {
+            const externalStore = new PresetStore({settings});
+            const index = await externalStore.loadIndex();
+            const externalEntry = index.find(entry => entry.source === 'file') ?? null;
+            assert(externalEntry && typeof externalEntry.id === 'string', 'external .milk appears in loadIndex');
+            assert(externalEntry.id.startsWith('file:'), 'external .milk index id is file:<absPath>');
+            const absPath = externalEntry.id.replace(/^file:/, '');
+            assert(absPath === presetPath, 'external .milk index id uses absolute path');
+
+            const loaded = await externalStore.loadPreset(externalEntry.id);
+            assert(loaded.source === 'file', 'external expression preset keeps source=file');
+            assert(loaded.path === presetPath, 'external .milk preset exposes absolute path for renderer');
+            assert(typeof loaded.frame_eqs === 'string' && loaded.frame_eqs.includes('zoom=zoom+energy*0.1'),
+                'external .milk preset exposes frame_eqs');
+            assert(typeof loaded.pixel_eqs === 'string' && loaded.pixel_eqs.includes('dx=rad*0.01'),
+                'external .milk preset exposes pixel_eqs');
+
+            // loadPreset must return a clone (no mutation leaks across calls).
+            const first = await externalStore.loadPreset(externalEntry.id);
+            first.frame_eqs = 'mutated';
+            const second = await externalStore.loadPreset(externalEntry.id);
+            assert(second.frame_eqs !== 'mutated', 'loadPreset returns a clone and does not leak mutations');
+        } finally {
+            const presetFile = Gio.File.new_for_path(presetPath);
+            const dirFile = Gio.File.new_for_path(tempDir);
+            try {
+                presetFile.delete(null);
+            } catch (_error) {
+            }
+            try {
+                dirFile.delete(null);
+            } catch (_error) {
+            }
+        }
     }
 
     {
-        const preset = await store.loadPreset('builtin:particle-comet');
-        assert(preset.id === 'builtin:particle-comet', 'particle-comet preset has correct id');
-        assert(preset.shaders && typeof preset.shaders.draw === 'string', 'particle-comet is draw-only');
-        assert(!preset.shaders.warp && !preset.shaders.composite, 'particle-comet has no warp/composite shader');
+        const tempDir = GLib.dir_make_tmp('milkdrop-invalid-presets-XXXXXX');
+        const goodPath = GLib.build_filenamev([tempDir, 'good.milk']);
+        const badPath = GLib.build_filenamev([tempDir, 'bad.milk']);
+        GLib.file_set_contents(goodPath,
+            '[preset00]\nper_frame_1=zoom=zoom+0.01;\n');
+        GLib.file_set_contents(badPath,
+            '[preset00]\nper_frame_1=a=b&c=d;\n');
+
+        const settings = {
+            settings_schema: {
+                has_key: key => key === 'preset-directory',
+            },
+            get_string: () => tempDir,
+        };
+
+        try {
+            const store = new PresetStore({settings});
+            const index = await store.loadIndex();
+            assert(index.some(e => e.id.endsWith('good.milk')),
+                'valid external .milk stays in index');
+            assert(!index.some(e => e.id.endsWith('bad.milk')),
+                'invalid-expression .milk is omitted from index');
+        } finally {
+            for (const p of [goodPath, badPath]) {
+                try {
+                    Gio.File.new_for_path(p).delete(null);
+                } catch (_e) {}
+            }
+            try {
+                Gio.File.new_for_path(tempDir).delete(null);
+            } catch (_e) {}
+        }
+    }
+
+    // Recursive scan: .milk files in subdirectories are discovered.
+    {
+        const tempDir = GLib.dir_make_tmp('milkdrop-recursive-presets-XXXXXX');
+        const subDir = GLib.build_filenamev([tempDir, 'sub']);
+        GLib.mkdir_with_parents(subDir, 0o755);
+        const topPath = GLib.build_filenamev([tempDir, 'top.milk']);
+        const subPath = GLib.build_filenamev([subDir, 'nested.milk']);
+        const milkContent = '[preset00]\nper_frame_1=zoom=1.0;\n';
+        GLib.file_set_contents(topPath, milkContent);
+        GLib.file_set_contents(subPath, milkContent);
+
+        const settings = {
+            settings_schema: {has_key: key => key === 'preset-directory'},
+            get_string: () => tempDir,
+        };
+
+        try {
+            const recursiveStore = new PresetStore({settings});
+            const index = await recursiveStore.loadIndex();
+            assert(index.some(e => e.id.endsWith('top.milk')),
+                'top-level .milk found by recursive scan');
+            assert(index.some(e => e.id.endsWith('nested.milk')),
+                '.milk in subdirectory found by recursive scan');
+            assert(index.length === 2,
+                'recursive scan returns exactly the right number of presets');
+        } finally {
+            for (const p of [topPath, subPath]) {
+                try { Gio.File.new_for_path(p).delete(null); } catch (_e) {}
+            }
+            try { Gio.File.new_for_path(subDir).delete(null); } catch (_e) {}
+            try { Gio.File.new_for_path(tempDir).delete(null); } catch (_e) {}
+        }
     }
 
     {
-        const preset = await store.loadPreset('builtin:waveform-lattice');
-        assert(preset.id === 'builtin:waveform-lattice', 'waveform-lattice preset has correct id');
-        assert(preset.shaders && typeof preset.shaders.composite === 'string', 'waveform-lattice is composite-only');
-        assert(!preset.shaders.draw && !preset.shaders.warp, 'waveform-lattice has no draw/warp shader');
-    }
-
-    {
-        const preset = await store.loadPreset('builtin:supernova-kick');
-        assert(preset.id === 'builtin:supernova-kick', 'supernova-kick preset has correct id');
-        assert(preset.shaders && typeof preset.shaders.draw === 'string', 'supernova-kick is draw-only');
-        assert(!preset.shaders.warp && !preset.shaders.composite, 'supernova-kick has no warp/composite shader');
-    }
-
-    {
-        const first = await store.loadPreset('builtin:supernova-kick');
-        first.frame.zoom.base = 999;
-        const second = await store.loadPreset('builtin:supernova-kick');
-        assert(second.frame.zoom.base !== 999, 'loadPreset returns a clone and does not leak mutations');
-    }
-
-    {
-        const preset = await store.loadPreset('builtin:hypnotic-tunnel');
-        assert(preset.shaders && typeof preset.shaders.draw === 'string', 'hypnotic tunnel exposes draw shader');
-        assert(preset.shaders && typeof preset.shaders.composite === 'string', 'hypnotic tunnel exposes composite shader');
+        assert(validatePresetExpressions({
+            init_eqs: '',
+            frame_eqs: 'zoom=1;',
+            pixel_eqs: '',
+            customWaves: [null, null, null, null],
+            customShapes: [null, null, null, null],
+        }), 'validatePresetExpressions accepts minimal preset');
+        assert(!validatePresetExpressions({
+            init_eqs: '',
+            frame_eqs: 'a=b&c=d;',
+            pixel_eqs: '',
+            customWaves: [null, null, null, null],
+            customShapes: [null, null, null, null],
+        }), 'validatePresetExpressions rejects bad frame_eqs');
     }
 
     {
         let threw = false;
         try {
-            await store.loadPreset('builtin:missing-id');
+            await store.loadPreset('file:/missing-id.milk');
         } catch (_error) {
             threw = true;
         }
@@ -106,6 +197,6 @@ export async function run(assert) {
         });
 
         const index = await guardedStore.loadIndex();
-        assert(index.length >= 8, 'missing preset-directory key falls back to built-in index without throwing');
+        assert(index.length === 0, 'missing preset-directory key returns empty index without throwing');
     }
 }

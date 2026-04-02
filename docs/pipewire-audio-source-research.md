@@ -51,3 +51,15 @@ This guarantees the extension does not capture microphone in auto mode.
 - Recommended setting for normal users: audio-source = auto.
 - For advanced/manual routing, users may set a specific monitor source name (for example, alsa_output...monitor).
 - If monitor capture backend is not available on a system, visuals continue without audio reactivity rather than using microphone.
+
+## Runtime diagnostics added
+
+The extension exposes audio pipeline status via `GetWindowStatus()` on D-Bus, including:
+
+- configured source
+- active source
+- recent-signal flag
+- restart attempts
+- reprobe failures
+
+This makes support/debug of PipeWire/Pulse routing issues possible without adding temporary debug patches.

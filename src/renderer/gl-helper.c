@@ -1,6 +1,20 @@
+/**
+ * milkdrop-gl-helper — offscreen EGL renderer using libprojectM.
+ *
+ * Protocol: JSON lines on stdin (init, resize, preset-change, frame, shutdown);
+ * JSON lines on stdout (telemetry, frame-pixels, frame-pixels-fd, frame-stat).
+ * Requires: EGL, OpenGL (or GLES 3.0), libprojectM-4, glib, json-glib.
+ */
+
 #define _GNU_SOURCE
 #include <epoxy/egl.h>
 #include <epoxy/gl.h>
+
+#include <projectM-4/core.h>
+#include <projectM-4/audio.h>
+#include <projectM-4/parameters.h>
+#include <projectM-4/render_opengl.h>
+#include <projectM-4/types.h>
 
 #include <glib.h>
 #include <gio/gio.h>
@@ -13,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <unistd.h>
 #ifdef __linux__
 #include <sys/mman.h>
@@ -37,206 +52,64 @@ typedef struct {
     EGLDisplay display;
     EGLContext context;
     EGLSurface surface;
+    EGLConfig  egl_config;
 
-    /* Default draw program (initial content) */
-    GLuint draw_program;
-    GLuint draw_vs;
-    GLuint draw_fs;
-    GLuint draw_vbo;
-    GLint  draw_time_uniform;
-    GLint  draw_energy_uniform;
-    GLint  draw_bass_uniform;
-    GLint  draw_mid_uniform;
-    GLint  draw_high_uniform;
-    GLint  draw_resolution_uniform;
+    projectm_handle projectm;
+    char *current_preset_path;
+    char *texture_search_path;
 
-    /* Warp pass */
-    GLuint warp_program;
-    GLuint warp_vs;
-    GLuint warp_fs;
-    GLuint warp_vbo;
-    GLint  warp_decay_uniform;
-    GLint  warp_prev_frame_uniform;
-    GLint  warp_time_uniform;
-    GLint  warp_energy_uniform;
-    GLint  warp_amount_uniform;
-    GLint  warp_speed_uniform;
-    GLint  warp_scale_uniform;
-    GLint  warp_type_uniform;
-    GLint  warp_in_shader_uniform;
-    int    warp_vertex_count;
-
-    /* Composite pass */
-    GLuint comp_program;
-    GLuint comp_vs;
-    GLuint comp_fs;
-    GLuint comp_vbo;
-    GLint  comp_warp_output_uniform;
-    GLint  comp_time_uniform;
-    GLint  comp_energy_uniform;
-    GLint  comp_bass_uniform;
-    GLint  comp_mid_uniform;
-    GLint  comp_high_uniform;
-    GLint  comp_decay_uniform;
-
-    /* Ping-pong framebuffers */
-    GLuint fbo[2];
-    GLuint fbo_tex[2];
-    int    current_fbo; /* index into fbo[]: 0 or 1 */
+    GLuint readback_fbo;
+    GLuint readback_tex;
 
     int width;
     int height;
     int stride;
     unsigned long frame_count;
     bool initialized;
-    bool program_ready;
+    bool invalid_surface_logged;
+
     char *shm_socket_path;
     GSocketConnection *shm_conn;
     guchar *pixel_buffer;
     gsize pixel_buffer_size;
+
+    int    shm_fd[2];
+    void  *shm_map[2];
+    gsize  shm_map_size;
+    int    shm_cur;
 } HelperState;
 
-/* ── Default shaders ───────────────────────────────────────────────── */
+#define PCM_SAMPLE_COUNT 576
 
-/* Draw shader: renders initial content (radial pattern) */
-static const char *DEFAULT_DRAW_VS =
-    "attribute vec2 aPosition;\n"
-    "void main() {\n"
-    "  gl_Position = vec4(aPosition, 0.0, 1.0);\n"
-    "}\n";
+/* ── Helpers ───────────────────────────────────────────────────────── */
 
-static const char *DEFAULT_DRAW_FS =
-    "precision mediump float;\n"
-    "uniform float uTime;\n"
-    "uniform float uEnergy;\n"
-    "uniform float uBass;\n"
-    "uniform float uMid;\n"
-    "uniform float uHigh;\n"
-    "uniform vec2 uResolution;\n"
-    "void main() {\n"
-    "  vec2 uv = gl_FragCoord.xy / uResolution;\n"
-    "  vec2 fc = uv - vec2(0.5);\n"
-    "  float dist = length(fc);\n"
-    "  float angle = atan(fc.y, fc.x);\n"
-    "  float w1 = sin(dist*12.0 - uTime*2.0 + uBass*6.0)*0.5+0.5;\n"
-    "  float w2 = sin(angle*5.0 + uTime*1.5 + uMid*4.0)*0.5+0.5;\n"
-    "  float w3 = sin(dist*8.0 + angle*3.0 - uTime + uHigh*3.0)*0.5+0.5;\n"
-    "  float e = max(0.3, uEnergy);\n"
-    "  vec3 c = vec3(w1*0.6+w3*0.3, w2*0.5+w1*0.2, w3*0.7+w2*0.2)*e;\n"
-    "  c *= smoothstep(0.7, 0.3, dist);\n"
-    "  gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);\n"
-    "}\n";
-
-/* Warp pass: samples previous frame; can deform UV in vertex shader from uniforms */
-static const char *WARP_VS =
-    "attribute vec2 aPosition;\n"
-    "attribute vec2 aTexCoord;\n"
-    "uniform float uTime;\n"
-    "uniform float uEnergy;\n"
-    "uniform float uWarpAmount;\n"
-    "uniform float uWarpSpeed;\n"
-    "uniform float uWarpScale;\n"
-    "uniform float uWarpType;\n"
-    "uniform float uWarpInShader;\n"
-    "varying vec2 vTexCoord;\n"
-    "void main() {\n"
-    "  vec2 uv = aTexCoord;\n"
-    "  if (uWarpInShader > 0.5 && uWarpAmount > 0.001) {\n"
-    "    float t = uTime;\n"
-    "    float e = uEnergy;\n"
-    "    float amount = uWarpAmount * (1.0 + e * 0.5);\n"
-    "    vec2 c = uv - vec2(0.5);\n"
-    "    float dist = length(c);\n"
-    "    if (uWarpType < 0.5) {\n"
-    "      float disp = sin(dist * uWarpScale * 10.0 - t * uWarpSpeed) * amount;\n"
-    "      uv += c / max(dist, 0.001) * disp;\n"
-    "    } else if (uWarpType < 1.5) {\n"
-    "      float angle = atan(c.y, c.x);\n"
-    "      float twist = uWarpAmount * sin(t * uWarpSpeed) * (1.0 + e * 0.3);\n"
-    "      float newAngle = angle + twist * dist * uWarpScale;\n"
-    "      uv = vec2(cos(newAngle), sin(newAngle)) * dist + vec2(0.5);\n"
-    "    } else {\n"
-    "      amount = uWarpAmount * (1.0 + e * 0.4);\n"
-    "      uv += vec2(sin(uv.y * uWarpScale * 6.28 + t * uWarpSpeed),\n"
-    "                 cos(uv.x * uWarpScale * 6.28 + t * uWarpSpeed * 0.7)) * amount;\n"
-    "    }\n"
-    "  }\n"
-    "  vTexCoord = uv;\n"
-    "  gl_Position = vec4(aPosition, 0.0, 1.0);\n"
-    "}\n";
-
-static const char *WARP_FS =
-    "precision mediump float;\n"
-    "uniform sampler2D uPrevFrame;\n"
-    "uniform float uDecay;\n"
-    "varying vec2 vTexCoord;\n"
-    "void main() {\n"
-    "  vec4 prev = texture2D(uPrevFrame, vTexCoord);\n"
-    "  gl_FragColor = prev * uDecay;\n"
-    "}\n";
-
-/* Composite pass: final output with audio reactivity */
-static const char *COMP_VS =
-    "attribute vec2 aPosition;\n"
-    "attribute vec2 aTexCoord;\n"
-    "varying vec2 vTexCoord;\n"
-    "void main() {\n"
-    "  vTexCoord = aTexCoord;\n"
-    "  gl_Position = vec4(aPosition, 0.0, 1.0);\n"
-    "}\n";
-
-static const char *COMP_FS =
-    "precision mediump float;\n"
-"uniform sampler2D uWarpOutput;\n"
-"uniform float uTime;\n"
-"uniform float uEnergy;\n"
-"uniform float uBass;\n"
-"varying vec2 vTexCoord;\n"
-"void main() {\n"
-"  vec2 uv = vec2(vTexCoord.x, 1.0 - vTexCoord.y);\n"
-"  vec4 color = texture2D(uWarpOutput, uv);\n"
-    "  float boost = 1.0 + uEnergy*0.3 + uBass*0.15;\n"
-    "  color.rgb *= boost;\n"
-    "  vec2 fc = vTexCoord - vec2(0.5);\n"
-    "  float vignette = 1.0 - dot(fc, fc)*1.2;\n"
-    "  color.rgb *= clamp(vignette, 0.0, 1.0);\n"
-    "  color.r += sin(uTime*0.4)*0.02;\n"
-    "  color.g += sin(uTime*0.3+1.0)*0.02;\n"
-    "  color.b += sin(uTime*0.5+2.0)*0.02;\n"
-    "  gl_FragColor = clamp(color, 0.0, 1.0);\n"
-    "}\n";
-
-/* ── Full-screen quad for composite/draw ───────────────────────────── */
-static const GLfloat FULLSCREEN_QUAD[] = {
-    /* pos.x  pos.y  u    v  */
-    -1.0f, -1.0f,  0.0f, 0.0f,
-     1.0f, -1.0f,  1.0f, 0.0f,
-    -1.0f,  1.0f,  0.0f, 1.0f,
-     1.0f, -1.0f,  1.0f, 0.0f,
-     1.0f,  1.0f,  1.0f, 1.0f,
-    -1.0f,  1.0f,  0.0f, 1.0f,
-};
-static const int FULLSCREEN_QUAD_VERTEX_COUNT = 6;
+static inline void
+escape_json_string(const char *src, char *dst, size_t dst_size)
+{
+    if (!src || !dst || dst_size < 1) return;
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j + 6 < dst_size; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '"')       { dst[j++] = '\\'; dst[j++] = '"'; }
+        else if (c == '\\') { dst[j++] = '\\'; dst[j++] = '\\'; }
+        else if (c == '\n') { dst[j++] = '\\'; dst[j++] = 'n'; }
+        else if (c == '\r') { dst[j++] = '\\'; dst[j++] = 'r'; }
+        else if (c == '\t') { dst[j++] = '\\'; dst[j++] = 't'; }
+        else if (c < 0x20)  { j += (size_t)snprintf(dst + j, dst_size - j, "\\u%04x", c); }
+        else                { dst[j++] = (char)c; }
+    }
+    dst[j] = '\0';
+}
 
 /* ── Telemetry / output helpers ─────────────────────────────────────── */
 
 static void
 emit_telemetry(const char *stage, const char *level, const char *msg, int ok)
 {
+    char escaped[2048];
+    escape_json_string(msg ? msg : "", escaped, sizeof(escaped));
     printf("{\"type\":\"telemetry\",\"stage\":\"%s\",\"level\":\"%s\",\"ok\":%s,\"msg\":\"%s\"}\n",
-        stage,
-        level,
-        ok ? "true" : "false",
-        msg ? msg : "");
-    fflush(stdout);
-}
-
-static void
-emit_shader_error(const char *stage, const char *msg)
-{
-    printf("{\"type\":\"shader_error\",\"stage\":\"%s\",\"msg\":\"%s\"}\n",
-        stage,
-        msg ? msg : "unknown shader error");
+        stage, level, ok ? "true" : "false", escaped);
     fflush(stdout);
 }
 
@@ -252,10 +125,8 @@ emit_frame_stat(unsigned long frame_count, double time_value,
     fflush(stdout);
 }
 
-/**
- * Send frame pixels via shared memory: write to memfd, send fd over Unix socket,
- * then emit frame-pixels-fd JSON on stdout. Returns true on success.
- */
+/* ── SHM transport ──────────────────────────────────────────────────── */
+
 static void
 close_shm_connection(HelperState *state)
 {
@@ -332,37 +203,41 @@ emit_frame_pixels_shm_fd(HelperState *state, int memfd, unsigned long frame_coun
     fflush(stdout);
     return true;
 #else
-    (void)pixels;
-    (void)pixel_count;
+    (void)state;
+    (void)memfd;
     (void)frame_count;
     (void)width;
     (void)height;
     (void)stride;
-    (void)shm_path;
     return false;
 #endif
 }
 
-static void
-emit_frame_pixels_base64(const guchar *pixels, gsize pixel_count, unsigned long frame_count, int width, int height, int stride)
+/*
+ * Re-open a memfd through /proc/self/fd so the sent descriptor has an
+ * independent file offset. Using duplicated descriptors that share one open
+ * file description can cause offset races when queued frame reads overlap.
+ */
+static int
+open_fd_for_send(int fd)
 {
-    gchar *encoded = g_base64_encode(pixels, pixel_count);
-    printf("{\"type\":\"frame-pixels\",\"frame\":%lu,\"width\":%d,\"height\":%d,\"stride\":%d,\"format\":\"rgba8\",\"data\":\"%s\"}\n",
-        frame_count,
-        width,
-        height,
-        stride,
-        encoded ? encoded : "");
-    fflush(stdout);
-    g_free(encoded);
+#ifdef __linux__
+    if (fd < 0)
+        return -1;
+    char path[64];
+    g_snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+    int reopened = open(path, O_RDONLY | O_CLOEXEC);
+    if (reopened >= 0)
+        return reopened;
+    return -1;
+#else
+    (void)fd;
+    return -1;
+#endif
 }
 
 /* ── JSON parsing (json-glib) ───────────────────────────────────────── */
 
-/**
- * Parse a newline-terminated JSON line into a JsonObject.
- * Caller must g_object_unref(result). Returns NULL on parse error.
- */
 static JsonObject *
 parse_message_line(const char *line)
 {
@@ -411,9 +286,6 @@ get_int(JsonObject *obj, const char *key, int fallback)
     return (int)json_object_get_int_member(obj, key);
 }
 
-/**
- * Get string member; returns newly-allocated string (caller g_free) or NULL.
- */
 static gchar *
 get_string_dup(JsonObject *obj, const char *key)
 {
@@ -423,41 +295,511 @@ get_string_dup(JsonObject *obj, const char *key)
     return s ? g_strdup(s) : NULL;
 }
 
-/* ── GL resource cleanup ──────────────────────────────────────────── */
-
-static void
-delete_program(GLuint *program, GLuint *vs, GLuint *fs)
+static int
+parse_pcm_data(JsonObject *obj, const char *key, GLfloat out[PCM_SAMPLE_COUNT])
 {
-    if (*program) { glDeleteProgram(*program); *program = 0; }
-    if (*vs)      { glDeleteShader(*vs);       *vs = 0; }
-    if (*fs)      { glDeleteShader(*fs);       *fs = 0; }
-}
+    for (int i = 0; i < PCM_SAMPLE_COUNT; i++)
+        out[i] = 0.0f;
 
-static void
-destroy_programs(HelperState *state)
-{
-    delete_program(&state->draw_program, &state->draw_vs, &state->draw_fs);
-    if (state->draw_vbo) { glDeleteBuffers(1, &state->draw_vbo); state->draw_vbo = 0; }
+    if (!obj || !json_object_has_member(obj, key))
+        return 0;
 
-    delete_program(&state->warp_program, &state->warp_vs, &state->warp_fs);
-    if (state->warp_vbo) { glDeleteBuffers(1, &state->warp_vbo); state->warp_vbo = 0; }
-    state->warp_vertex_count = 0;
+    JsonArray *arr = json_object_get_array_member(obj, key);
+    if (!arr)
+        return 0;
 
-    delete_program(&state->comp_program, &state->comp_vs, &state->comp_fs);
-    if (state->comp_vbo) { glDeleteBuffers(1, &state->comp_vbo); state->comp_vbo = 0; }
-
-    for (int i = 0; i < 2; i++) {
-        if (state->fbo[i])     { glDeleteFramebuffers(1, &state->fbo[i]);  state->fbo[i] = 0; }
-        if (state->fbo_tex[i]) { glDeleteTextures(1, &state->fbo_tex[i]);  state->fbo_tex[i] = 0; }
+    guint len = json_array_get_length(arr);
+    int count = (int)MIN((guint)PCM_SAMPLE_COUNT, len);
+    for (int i = 0; i < count; i++) {
+        double sample = json_array_get_double_element(arr, i);
+        if (!isfinite(sample))
+            sample = 0.0;
+        out[i] = (GLfloat)sample;
     }
-    state->current_fbo = 0;
-    state->program_ready = false;
+
+    return count;
 }
+
+/* ── Framebuffer creation ──────────────────────────────────────────── */
+
+static bool
+create_fbo(GLuint *fbo, GLuint *tex, int width, int height)
+{
+    glGenTextures(1, tex);
+    glBindTexture(GL_TEXTURE_2D, *tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glGenFramebuffers(1, fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, *fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, *tex, 0);
+
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        emit_telemetry("fbo_init", "error", "framebuffer incomplete", 0);
+        return false;
+    }
+    return true;
+}
+
+/* ── GL load proc for projectM ─────────────────────────────────────── */
+
+static void *
+gl_load_proc(const char *name, void *user_data)
+{
+    (void)user_data;
+    return (void *)epoxy_eglGetProcAddress(name);
+}
+
+/* ── EGL + projectM initialisation ─────────────────────────────────── */
+
+static bool
+initialize_egl(HelperState *state, int width, int height)
+{
+    width  = width  > 0 ? width  : 1;
+    height = height > 0 ? height : 1;
+
+    state->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    if (state->display == EGL_NO_DISPLAY) {
+        emit_telemetry("helper_init", "error", "eglGetDisplay failed", 0);
+        return false;
+    }
+
+    if (!eglInitialize(state->display, NULL, NULL)) {
+        emit_telemetry("helper_init", "error", "eglInitialize failed", 0);
+        state->display = EGL_NO_DISPLAY;
+        return false;
+    }
+
+    /* Try Desktop OpenGL 3.3 Core first (projectM default build). */
+    const EGLint gl_config_attribs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_NONE,
+    };
+    const EGLint gl_ctx_attribs[] = {
+        EGL_CONTEXT_MAJOR_VERSION, 3,
+        EGL_CONTEXT_MINOR_VERSION, 3,
+        EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
+        EGL_NONE,
+    };
+
+    /* Fallback: GLES 3.0 (projectM ENABLE_GLES builds, ARM/embedded). */
+    const EGLint es_config_attribs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_NONE,
+    };
+    const EGLint es_ctx_attribs[] = {
+        EGL_CONTEXT_CLIENT_VERSION, 3,
+        EGL_NONE,
+    };
+
+    EGLConfig config = NULL;
+    EGLint num_config = 0;
+    bool using_desktop_gl = false;
+
+    if (eglBindAPI(EGL_OPENGL_API) &&
+        eglChooseConfig(state->display, gl_config_attribs, &config, 1, &num_config) &&
+        num_config >= 1) {
+        using_desktop_gl = true;
+    } else {
+        emit_telemetry("helper_init", "info", "Desktop GL unavailable, trying GLES 3.0", 0);
+        if (!eglBindAPI(EGL_OPENGL_ES_API) ||
+            !eglChooseConfig(state->display, es_config_attribs, &config, 1, &num_config) ||
+            num_config < 1) {
+            emit_telemetry("helper_init", "error", "no suitable EGL config (need GL 3.3 or GLES 3.0)", 0);
+            eglTerminate(state->display);
+            state->display = EGL_NO_DISPLAY;
+            return false;
+        }
+    }
+
+    state->egl_config = config;
+
+    EGLint pbuffer_attribs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+    state->surface = eglCreatePbufferSurface(state->display, config, pbuffer_attribs);
+    if (state->surface == EGL_NO_SURFACE) {
+        emit_telemetry("helper_init", "error", "eglCreatePbufferSurface failed", 0);
+        eglTerminate(state->display);
+        state->display = EGL_NO_DISPLAY;
+        return false;
+    }
+
+    const EGLint *ctx_attribs = using_desktop_gl ? gl_ctx_attribs : es_ctx_attribs;
+    state->context = eglCreateContext(state->display, config, EGL_NO_CONTEXT, ctx_attribs);
+    if (state->context == EGL_NO_CONTEXT) {
+        emit_telemetry("helper_init", "error", "eglCreateContext failed", 0);
+        eglDestroySurface(state->display, state->surface);
+        eglTerminate(state->display);
+        state->display = EGL_NO_DISPLAY;
+        state->surface = EGL_NO_SURFACE;
+        return false;
+    }
+
+    if (!eglMakeCurrent(state->display, state->surface, state->surface, state->context)) {
+        emit_telemetry("helper_init", "error", "eglMakeCurrent failed", 0);
+        eglDestroyContext(state->display, state->context);
+        eglDestroySurface(state->display, state->surface);
+        eglTerminate(state->display);
+        state->display = EGL_NO_DISPLAY;
+        state->context = EGL_NO_CONTEXT;
+        state->surface = EGL_NO_SURFACE;
+        return false;
+    }
+
+    /* Create projectM instance */
+    state->projectm = projectm_create_with_opengl_load_proc(gl_load_proc, NULL);
+    if (!state->projectm) {
+        emit_telemetry("helper_init", "error", "projectm_create failed", 0);
+        goto fail_after_egl;
+    }
+
+    projectm_set_window_size(state->projectm, (size_t)width, (size_t)height);
+    projectm_set_preset_locked(state->projectm, true);
+    if (state->texture_search_path) {
+        const char *paths[] = { state->texture_search_path };
+        projectm_set_texture_search_paths(state->projectm, paths, 1);
+    }
+
+    state->width  = width;
+    state->height = height;
+    state->stride = width * 4;
+    state->frame_count = 0;
+    state->initialized = true;
+
+    /* Pixel readback buffer */
+    gsize need = (gsize)state->stride * (gsize)state->height;
+    if (need > state->pixel_buffer_size) {
+        g_free(state->pixel_buffer);
+        state->pixel_buffer = g_malloc(need);
+        state->pixel_buffer_size = state->pixel_buffer ? need : 0;
+    }
+
+    /* Readback FBO (texture-backed, avoids unreliable EGL pbuffer reads) */
+    if (!create_fbo(&state->readback_fbo, &state->readback_tex, width, height)) {
+        emit_telemetry("helper_init", "error", "create readback FBO failed", 0);
+        projectm_destroy(state->projectm);
+        state->projectm = NULL;
+        goto fail_after_egl;
+    }
+
+    /* Persistent SHM double-buffer */
+#ifdef __linux__
+    if (state->shm_socket_path) {
+        for (int i = 0; i < 2; i++) {
+            state->shm_fd[i] = memfd_create("milkdrop-frame", MFD_CLOEXEC);
+            if (state->shm_fd[i] >= 0 && ftruncate(state->shm_fd[i], (off_t)need) == 0) {
+                state->shm_map[i] = mmap(NULL, need, PROT_READ | PROT_WRITE,
+                                         MAP_SHARED, state->shm_fd[i], 0);
+                if (state->shm_map[i] == MAP_FAILED)
+                    state->shm_map[i] = NULL;
+            }
+            if (!state->shm_map[i] && state->shm_fd[i] >= 0) {
+                close(state->shm_fd[i]);
+                state->shm_fd[i] = -1;
+            }
+        }
+        state->shm_map_size = need;
+        state->shm_cur = 0;
+    }
+#endif
+
+    const char *renderer = (const char *)glGetString(GL_RENDERER);
+    const char *gl_version = (const char *)glGetString(GL_VERSION);
+    printf("{\"type\":\"telemetry\",\"stage\":\"helper_init\",\"level\":\"info\",\"ok\":true,\"renderer\":\"projectM-%s\",\"gl\":\"%s\",\"api\":\"%s\"}\n",
+        renderer ? renderer : "unknown",
+        gl_version ? gl_version : "unknown",
+        using_desktop_gl ? "GL" : "GLES");
+    fflush(stdout);
+
+    /* Signal readiness — gl-bridge.js recognises stage=program_ready as the
+     * "helper is ready to receive frame messages" event. */
+    emit_telemetry("program_ready", "info", "projectM rendering pipeline ready", 1);
+    return true;
+
+fail_after_egl:
+    eglMakeCurrent(state->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(state->display, state->context);
+    eglDestroySurface(state->display, state->surface);
+    eglTerminate(state->display);
+    state->display = EGL_NO_DISPLAY;
+    state->context = EGL_NO_CONTEXT;
+    state->surface = EGL_NO_SURFACE;
+    state->initialized = false;
+    return false;
+}
+
+/* ── Resize ────────────────────────────────────────────────────────── */
+
+static bool
+resize_buffers(HelperState *state, int width, int height)
+{
+    if (!state->initialized || !state->projectm)
+        return false;
+
+    width  = width  > 0 ? width  : 1;
+    height = height > 0 ? height : 1;
+
+    projectm_set_window_size(state->projectm, (size_t)width, (size_t)height);
+
+    /* Recreate EGL pbuffer surface */
+    EGLint pbuf_attr[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+    eglMakeCurrent(state->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    if (state->surface != EGL_NO_SURFACE)
+        eglDestroySurface(state->display, state->surface);
+    state->surface = eglCreatePbufferSurface(state->display, state->egl_config, pbuf_attr);
+    if (state->surface == EGL_NO_SURFACE) {
+        emit_telemetry("resize", "error", "eglCreatePbufferSurface failed", 0);
+        state->surface = EGL_NO_SURFACE;
+        return false;
+    }
+    if (!eglMakeCurrent(state->display, state->surface, state->surface, state->context)) {
+        emit_telemetry("resize", "error", "eglMakeCurrent failed after resize", 0);
+        eglDestroySurface(state->display, state->surface);
+        state->surface = EGL_NO_SURFACE;
+        return false;
+    }
+    state->invalid_surface_logged = false;
+
+    state->width  = width;
+    state->height = height;
+    state->stride = width * 4;
+
+    const gsize need = (gsize)state->stride * (gsize)state->height;
+
+    if (need > state->pixel_buffer_size) {
+        g_free(state->pixel_buffer);
+        state->pixel_buffer = g_malloc(need);
+        state->pixel_buffer_size = state->pixel_buffer ? need : 0;
+    }
+
+    /* Recreate readback FBO */
+    if (state->readback_fbo) { glDeleteFramebuffers(1, &state->readback_fbo); state->readback_fbo = 0; }
+    if (state->readback_tex) { glDeleteTextures(1, &state->readback_tex); state->readback_tex = 0; }
+    if (!create_fbo(&state->readback_fbo, &state->readback_tex, width, height)) {
+        emit_telemetry("resize", "error", "create readback fbo failed", 0);
+        return false;
+    }
+
+    /* Recreate SHM double-buffer */
+#ifdef __linux__
+    if (state->shm_socket_path) {
+        for (int i = 0; i < 2; i++) {
+            if (state->shm_map[i]) {
+                munmap(state->shm_map[i], state->shm_map_size);
+                state->shm_map[i] = NULL;
+            }
+            if (state->shm_fd[i] >= 0) {
+                close(state->shm_fd[i]);
+                state->shm_fd[i] = -1;
+            }
+            state->shm_fd[i] = memfd_create("milkdrop-frame", MFD_CLOEXEC);
+            if (state->shm_fd[i] >= 0 && ftruncate(state->shm_fd[i], (off_t)need) == 0) {
+                state->shm_map[i] = mmap(NULL, need, PROT_READ | PROT_WRITE,
+                                         MAP_SHARED, state->shm_fd[i], 0);
+                if (state->shm_map[i] == MAP_FAILED)
+                    state->shm_map[i] = NULL;
+            }
+            if (!state->shm_map[i] && state->shm_fd[i] >= 0) {
+                close(state->shm_fd[i]);
+                state->shm_fd[i] = -1;
+            }
+        }
+        state->shm_map_size = need;
+        state->shm_cur = 0;
+    }
+#endif
+
+    emit_telemetry("resize", "info", "resize_ok", 1);
+    return true;
+}
+
+/* ── Render frame ──────────────────────────────────────────────────── */
+
+static void
+render_frame(HelperState *state, double time_value,
+             const float *pcm_left, const float *pcm_right, int pcm_count,
+             const char *preset_path)
+{
+    if (!state->initialized || !state->projectm || !state->readback_fbo)
+        return;
+    if (state->surface == EGL_NO_SURFACE) {
+        if (!state->invalid_surface_logged) {
+            emit_telemetry("render", "error", "surface unavailable; skipping frame", 0);
+            state->invalid_surface_logged = true;
+        }
+        return;
+    }
+    state->invalid_surface_logged = false;
+
+    const int width = state->width;
+    const int height = state->height;
+    const int stride = state->stride;
+    if (width < 1 || height < 1 || stride < width * 4) {
+        emit_telemetry("render", "warn", "invalid dimensions; skipping frame", 0);
+        return;
+    }
+
+    /* Load preset if changed */
+    if (preset_path && preset_path[0]) {
+        if (!state->current_preset_path || strcmp(preset_path, state->current_preset_path) != 0) {
+            if (!g_file_test(preset_path, G_FILE_TEST_IS_REGULAR)) {
+                emit_telemetry("preset", "warn", "preset path is not a readable file; skipping load", 0);
+            } else {
+                g_free(state->current_preset_path);
+                state->current_preset_path = g_strdup(preset_path);
+                projectm_load_preset_file(state->projectm, preset_path, false);
+            }
+        }
+    }
+
+    projectm_set_frame_time(state->projectm, time_value);
+
+    /* Feed interleaved stereo PCM to projectM */
+    if (pcm_count > 0 && pcm_left && pcm_right) {
+        unsigned int max_samples = projectm_pcm_get_max_samples();
+        int count = (int)((unsigned int)pcm_count > max_samples ? max_samples : (unsigned int)pcm_count);
+        float *interleaved = g_alloca((size_t)count * 2 * sizeof(float));
+        for (int i = 0; i < count; i++) {
+            interleaved[i * 2]     = pcm_left[i];
+            interleaved[i * 2 + 1] = pcm_right[i];
+        }
+        projectm_pcm_add_float(state->projectm, interleaved, (unsigned int)count, PROJECTM_STEREO);
+    }
+
+    const gsize pixel_count = (gsize)stride * (gsize)height;
+
+    gint64 render_start = g_get_monotonic_time();
+
+    PERF_BEGIN(projectm_render);
+    glBindFramebuffer(GL_FRAMEBUFFER, state->readback_fbo);
+    {
+        GLenum fb_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (fb_status != GL_FRAMEBUFFER_COMPLETE) {
+            char msg[96];
+            g_snprintf(msg, sizeof(msg), "readback FBO incomplete (0x%04x)", (unsigned)fb_status);
+            emit_telemetry("render", "warn", msg, 0);
+            PERF_END(projectm_render);
+            return;
+        }
+    }
+    glViewport(0, 0, width, height);
+    projectm_opengl_render_frame_fbo(state->projectm, state->readback_fbo);
+    PERF_END(projectm_render);
+
+    gint64 render_end = g_get_monotonic_time();
+    gint64 render_us = render_end - render_start;
+    gint64 readback_start = render_end;
+
+    /* ── Readback ──────────────────────────────────────────────────── */
+    PERF_BEGIN(readback);
+    if (pixel_count > state->pixel_buffer_size || !state->pixel_buffer) {
+        emit_telemetry("readback", "warn", "pixel buffer too small", 0);
+        if (state->surface != EGL_NO_SURFACE)
+            eglSwapBuffers(state->display, state->surface);
+        state->frame_count += 1;
+        PERF_END(readback);
+        emit_frame_stat(state->frame_count, time_value, render_us, 0);
+        return;
+    }
+
+    for (int _drain = 0; _drain < 64 && glGetError() != GL_NO_ERROR; _drain++) {}
+    glBindFramebuffer(GL_FRAMEBUFFER, state->readback_fbo);
+
+    /* When SHM double-buffer is ready, read directly into the mapped region to
+     * avoid a full-frame memcpy after glReadPixels. Retain pixel_buffer as the
+     * destination for the temporary-memfd path. */
+#ifdef __linux__
+    int _shm_direct_idx = -1;
+    if (state->shm_socket_path && state->shm_map[state->shm_cur])
+        _shm_direct_idx = state->shm_cur;
+    guchar *readback_dest = (_shm_direct_idx >= 0)
+        ? (guchar *)state->shm_map[_shm_direct_idx]
+        : state->pixel_buffer;
+#else
+    guchar *readback_dest = state->pixel_buffer;
+#endif
+
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, readback_dest);
+    GLenum gl_err = glGetError();
+    bool readback_ok = (gl_err == GL_NO_ERROR);
+    if (!readback_ok) {
+        char errmsg[64];
+        g_snprintf(errmsg, sizeof(errmsg), "glReadPixels error (gl_err=0x%04x)", gl_err);
+        emit_telemetry("readback", "warn", errmsg, 0);
+    }
+
+    if (state->surface != EGL_NO_SURFACE)
+        eglSwapBuffers(state->display, state->surface);
+    state->frame_count += 1;
+
+    if (readback_ok) {
+        bool sent = false;
+#ifdef __linux__
+        if (state->shm_socket_path) {
+            int idx = state->shm_cur;
+            if (state->shm_map[idx]) {
+                /* Pixels already in shm_map[idx] when _shm_direct_idx >= 0;
+                 * only copy if glReadPixels went to pixel_buffer instead. */
+                if (_shm_direct_idx < 0)
+                    memcpy(state->shm_map[idx], state->pixel_buffer, pixel_count);
+                int send_fd = open_fd_for_send(state->shm_fd[idx]);
+                if (send_fd >= 0) {
+                    sent = emit_frame_pixels_shm_fd(state, send_fd,
+                                                    state->frame_count, width, height, stride);
+                    close(send_fd);
+                } else {
+                    emit_telemetry("shm_send_fd", "warn", "failed to reopen shm fd for send", 0);
+                }
+                state->shm_cur = 1 - idx;
+            } else {
+                int memfd = memfd_create("milkdrop-frame", MFD_CLOEXEC);
+                if (memfd >= 0 && ftruncate(memfd, (off_t)pixel_count) == 0) {
+                    void *mapped = mmap(NULL, pixel_count, PROT_READ | PROT_WRITE,
+                                        MAP_SHARED, memfd, 0);
+                    if (mapped != MAP_FAILED) {
+                        memcpy(mapped, state->pixel_buffer, pixel_count);
+                        sent = emit_frame_pixels_shm_fd(state, memfd, state->frame_count,
+                                                        width, height, stride);
+                        munmap(mapped, pixel_count);
+                    }
+                }
+                if (memfd >= 0)
+                    close(memfd);
+            }
+        }
+#endif
+        if (!sent) {
+            emit_telemetry("readback", "warn",
+                           "failed to deliver frame pixels via SHM/FD transport", 0);
+        }
+    }
+
+    PERF_END(readback);
+    emit_frame_stat(state->frame_count, time_value, render_us,
+                    g_get_monotonic_time() - readback_start);
+}
+
+/* ── Shutdown ──────────────────────────────────────────────────────── */
 
 static void
 shutdown_helper(HelperState *state)
 {
-    destroy_programs(state);
+    if (state->projectm) {
+        projectm_destroy(state->projectm);
+        state->projectm = NULL;
+    }
+
+    if (state->readback_fbo) { glDeleteFramebuffers(1, &state->readback_fbo); state->readback_fbo = 0; }
+    if (state->readback_tex) { glDeleteTextures(1, &state->readback_tex); state->readback_tex = 0; }
 
     if (state->display != EGL_NO_DISPLAY) {
         eglMakeCurrent(state->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
@@ -472,511 +814,108 @@ shutdown_helper(HelperState *state)
     state->context = EGL_NO_CONTEXT;
     state->surface = EGL_NO_SURFACE;
     state->initialized = false;
+
+#ifdef __linux__
+    for (int i = 0; i < 2; i++) {
+        if (state->shm_map[i]) {
+            munmap(state->shm_map[i], state->shm_map_size);
+            state->shm_map[i] = NULL;
+        }
+        if (state->shm_fd[i] >= 0) {
+            close(state->shm_fd[i]);
+            state->shm_fd[i] = -1;
+        }
+    }
+    state->shm_map_size = 0;
+#endif
+
     close_shm_connection(state);
     g_free(state->pixel_buffer);
     state->pixel_buffer = NULL;
     state->pixel_buffer_size = 0;
 }
 
-/* ── Shader compilation ────────────────────────────────────────────── */
+/* ── Main loop ─────────────────────────────────────────────────────── */
 
-static bool
-compile_shader(GLuint shader, const char *source, const char *stage)
+typedef enum {
+    MSG_LOOP_CONTINUE,
+    MSG_LOOP_BREAK,
+} MessageLoopResult;
+
+static MessageLoopResult
+dispatch_stdin_message(JsonObject *obj, HelperState *state)
 {
-    GLint status = GL_FALSE;
-    glShaderSource(shader, 1, &source, NULL);
-    glCompileShader(shader);
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
-    if (status == GL_TRUE)
-        return true;
-
-    char info_log[1024] = {0};
-    glGetShaderInfoLog(shader, (GLsizei)sizeof info_log, NULL, info_log);
-    emit_shader_error(stage, info_log);
-    return false;
-}
-
-static bool
-link_program(GLuint program, const char *stage)
-{
-    GLint linked = GL_FALSE;
-    glLinkProgram(program);
-    glGetProgramiv(program, GL_LINK_STATUS, &linked);
-    if (linked == GL_TRUE)
-        return true;
-
-    char info_log[1024] = {0};
-    glGetProgramInfoLog(program, (GLsizei)sizeof info_log, NULL, info_log);
-    emit_shader_error(stage, info_log);
-    return false;
-}
-
-static GLuint
-build_program(const char *vs_src, const char *fs_src,
-              GLuint *out_vs, GLuint *out_fs, const char *stage)
-{
-    *out_vs = glCreateShader(GL_VERTEX_SHADER);
-    *out_fs = glCreateShader(GL_FRAGMENT_SHADER);
-
-    if (!compile_shader(*out_vs, vs_src, stage)) return 0;
-    if (!compile_shader(*out_fs, fs_src, stage)) return 0;
-
-    GLuint prog = glCreateProgram();
-    glAttachShader(prog, *out_vs);
-    glAttachShader(prog, *out_fs);
-    glBindAttribLocation(prog, 0, "aPosition");
-    glBindAttribLocation(prog, 1, "aTexCoord");
-    if (!link_program(prog, stage)) { glDeleteProgram(prog); return 0; }
-    return prog;
-}
-
-/* ── Framebuffer creation ──────────────────────────────────────────── */
-
-static bool
-create_fbo(GLuint *fbo, GLuint *tex, int width, int height)
-{
-    glGenTextures(1, tex);
-    glBindTexture(GL_TEXTURE_2D, *tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glGenFramebuffers(1, fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, *fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, *tex, 0);
-
-    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    if (status != GL_FRAMEBUFFER_COMPLETE) {
-        emit_telemetry("fbo_init", "error", "framebuffer incomplete", 0);
-        return false;
-    }
-    return true;
-}
-
-/* ── EGL initialisation ────────────────────────────────────────────── */
-
-static bool
-initialize_egl(HelperState *state, int width, int height)
-{
-    const EGLint config_attributes[] = {
-        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
-        EGL_RED_SIZE, 8,
-        EGL_GREEN_SIZE, 8,
-        EGL_BLUE_SIZE, 8,
-        EGL_ALPHA_SIZE, 8,
-        EGL_NONE,
-    };
-    const EGLint context_attributes[] = {
-        EGL_CONTEXT_CLIENT_VERSION, 2,
-        EGL_NONE,
-    };
-    EGLint pbuffer_attributes[] = {
-        EGL_WIDTH, width > 0 ? width : 1,
-        EGL_HEIGHT, height > 0 ? height : 1,
-        EGL_NONE,
-    };
-
-    state->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    if (state->display == EGL_NO_DISPLAY) {
-        emit_telemetry("helper_init", "error", "eglGetDisplay failed", 0);
-        return false;
+    if (message_has_type(obj, "shutdown")) {
+        json_object_unref(obj);
+        return MSG_LOOP_BREAK;
     }
 
-    if (!eglInitialize(state->display, NULL, NULL)) {
-        emit_telemetry("helper_init", "error", "eglInitialize failed", 0);
-        return false;
+    if (message_has_type(obj, "init")) {
+        int w = get_int(obj, "width", 320);
+        int h = get_int(obj, "height", 180);
+        gchar *tex_path = get_string_dup(obj, "texturePath");
+        json_object_unref(obj);
+        if (tex_path) {
+            g_free(state->texture_search_path);
+            state->texture_search_path = tex_path;
+        }
+        if (!initialize_egl(state, w, h))
+            return MSG_LOOP_BREAK;
+        return MSG_LOOP_CONTINUE;
     }
 
-    if (!eglBindAPI(EGL_OPENGL_ES_API)) {
-        emit_telemetry("helper_init", "error", "eglBindAPI failed", 0);
-        return false;
+    if (message_has_type(obj, "resize")) {
+        int w = get_int(obj, "width", state->width);
+        int h = get_int(obj, "height", state->height);
+        json_object_unref(obj);
+        if (state->initialized && (w != state->width || h != state->height))
+            resize_buffers(state, w, h);
+        return MSG_LOOP_CONTINUE;
     }
 
-    EGLConfig config = NULL;
-    EGLint config_count = 0;
-    if (!eglChooseConfig(state->display, config_attributes, &config, 1, &config_count) || config_count < 1) {
-        emit_telemetry("helper_init", "error", "eglChooseConfig failed", 0);
-        return false;
-    }
-
-    pbuffer_attributes[1] = width > 0 ? width : 1;
-    pbuffer_attributes[3] = height > 0 ? height : 1;
-    state->surface = eglCreatePbufferSurface(state->display, config, pbuffer_attributes);
-    if (state->surface == EGL_NO_SURFACE) {
-        emit_telemetry("helper_init", "error", "eglCreatePbufferSurface failed", 0);
-        return false;
-    }
-
-    state->context = eglCreateContext(state->display, config, EGL_NO_CONTEXT, context_attributes);
-    if (state->context == EGL_NO_CONTEXT) {
-        emit_telemetry("helper_init", "error", "eglCreateContext failed", 0);
-        return false;
-    }
-
-    if (!eglMakeCurrent(state->display, state->surface, state->surface, state->context)) {
-        emit_telemetry("helper_init", "error", "eglMakeCurrent failed", 0);
-        return false;
-    }
-
-    state->width = width;
-    state->height = height;
-    state->stride = (width > 0 ? width : 1) * 4;
-    state->initialized = true;
-
-    const gsize need = (gsize)state->stride * (gsize)state->height;
-    if (need > state->pixel_buffer_size) {
-        g_free(state->pixel_buffer);
-        state->pixel_buffer = g_malloc(need);
-        state->pixel_buffer_size = state->pixel_buffer ? need : 0;
-    }
-
-    const GLubyte *renderer = glGetString(GL_RENDERER);
-    const char *renderer_name = renderer ? (const char *)renderer : "unknown";
-    printf("{\"type\":\"telemetry\",\"stage\":\"helper_init\",\"level\":\"info\",\"ok\":true,\"renderer\":\"%s\"}\n",
-        renderer_name);
-    fflush(stdout);
-    return true;
-}
-
-/* ── Compile with custom shader sources ────────────────────────────── */
-
-static bool
-compile_custom_program(HelperState *state,
-                       const char *custom_draw_fs,
-                       const char *custom_warp_fs,
-                       const char *custom_comp_fs)
-{
-    destroy_programs(state);
-
-    /* Draw program */
-    const char *draw_fs = (custom_draw_fs && *custom_draw_fs) ? custom_draw_fs : DEFAULT_DRAW_FS;
-    state->draw_program = build_program(DEFAULT_DRAW_VS, draw_fs,
-                                        &state->draw_vs, &state->draw_fs, "draw");
-    if (!state->draw_program) {
-        /* Fall back to default on shader error */
-        emit_telemetry("draw_compile", "warn", "custom draw shader failed, using default", 0);
-        state->draw_program = build_program(DEFAULT_DRAW_VS, DEFAULT_DRAW_FS,
-                                            &state->draw_vs, &state->draw_fs, "draw_fallback");
-        if (!state->draw_program)
-            return false;
-    }
-
-    state->draw_time_uniform       = glGetUniformLocation(state->draw_program, "uTime");
-    state->draw_energy_uniform     = glGetUniformLocation(state->draw_program, "uEnergy");
-    state->draw_bass_uniform       = glGetUniformLocation(state->draw_program, "uBass");
-    state->draw_mid_uniform        = glGetUniformLocation(state->draw_program, "uMid");
-    state->draw_high_uniform       = glGetUniformLocation(state->draw_program, "uHigh");
-    state->draw_resolution_uniform = glGetUniformLocation(state->draw_program, "uResolution");
-
-    glGenBuffers(1, &state->draw_vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, state->draw_vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(FULLSCREEN_QUAD), FULLSCREEN_QUAD, GL_STATIC_DRAW);
-
-    /* Warp program */
-    const char *warp_fs = (custom_warp_fs && *custom_warp_fs) ? custom_warp_fs : WARP_FS;
-    state->warp_program = build_program(WARP_VS, warp_fs,
-                                        &state->warp_vs, &state->warp_fs, "warp");
-    if (!state->warp_program) {
-        emit_telemetry("warp_compile", "warn", "custom warp shader failed, using default", 0);
-        state->warp_program = build_program(WARP_VS, WARP_FS,
-                                            &state->warp_vs, &state->warp_fs, "warp_fallback");
-        if (!state->warp_program)
-            return false;
-    }
-
-    state->warp_decay_uniform       = glGetUniformLocation(state->warp_program, "uDecay");
-    state->warp_prev_frame_uniform  = glGetUniformLocation(state->warp_program, "uPrevFrame");
-    state->warp_time_uniform        = glGetUniformLocation(state->warp_program, "uTime");
-    state->warp_energy_uniform     = glGetUniformLocation(state->warp_program, "uEnergy");
-    state->warp_amount_uniform     = glGetUniformLocation(state->warp_program, "uWarpAmount");
-    state->warp_speed_uniform      = glGetUniformLocation(state->warp_program, "uWarpSpeed");
-    state->warp_scale_uniform      = glGetUniformLocation(state->warp_program, "uWarpScale");
-    state->warp_type_uniform       = glGetUniformLocation(state->warp_program, "uWarpType");
-    state->warp_in_shader_uniform  = glGetUniformLocation(state->warp_program, "uWarpInShader");
-
-    glGenBuffers(1, &state->warp_vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, state->warp_vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(FULLSCREEN_QUAD), FULLSCREEN_QUAD, GL_STATIC_DRAW);
-    state->warp_vertex_count = FULLSCREEN_QUAD_VERTEX_COUNT;
-
-    /* Composite program */
-    const char *comp_fs = (custom_comp_fs && *custom_comp_fs) ? custom_comp_fs : COMP_FS;
-    state->comp_program = build_program(COMP_VS, comp_fs,
-                                        &state->comp_vs, &state->comp_fs, "composite");
-    if (!state->comp_program) {
-        emit_telemetry("comp_compile", "warn", "custom composite shader failed, using default", 0);
-        state->comp_program = build_program(COMP_VS, COMP_FS,
-                                            &state->comp_vs, &state->comp_fs, "composite_fallback");
-        if (!state->comp_program)
-            return false;
-    }
-
-    state->comp_warp_output_uniform = glGetUniformLocation(state->comp_program, "uWarpOutput");
-    state->comp_time_uniform        = glGetUniformLocation(state->comp_program, "uTime");
-    state->comp_energy_uniform      = glGetUniformLocation(state->comp_program, "uEnergy");
-    state->comp_bass_uniform        = glGetUniformLocation(state->comp_program, "uBass");
-    state->comp_mid_uniform         = glGetUniformLocation(state->comp_program, "uMid");
-    state->comp_high_uniform        = glGetUniformLocation(state->comp_program, "uHigh");
-    state->comp_decay_uniform       = glGetUniformLocation(state->comp_program, "uDecay");
-
-    glGenBuffers(1, &state->comp_vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, state->comp_vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(FULLSCREEN_QUAD), FULLSCREEN_QUAD, GL_STATIC_DRAW);
-
-    /* Ping-pong framebuffers */
-    for (int i = 0; i < 2; i++) {
-        if (!create_fbo(&state->fbo[i], &state->fbo_tex[i], state->width, state->height))
-            return false;
-    }
-    state->current_fbo = 0;
-
-    for (int i = 0; i < 2; i++) {
-        glBindFramebuffer(GL_FRAMEBUFFER, state->fbo[i]);
-        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-    }
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-    state->program_ready = true;
-    emit_telemetry("program_ready", "info", "shader pipeline compiled", 1);
-    return true;
-}
-
-/* ── Compile all programs ──────────────────────────────────────────── */
-
-static bool
-compile_default_program(HelperState *state)
-{
-    return compile_custom_program(state, NULL, NULL, NULL);
-}
-
-/* ── Upload warp mesh ──────────────────────────────────────────────── */
-
-static void
-upload_mesh(HelperState *state, JsonObject *obj)
-{
-    gchar *b64 = get_string_dup(obj, "data");
-    if (!b64) {
-        emit_telemetry("mesh_upload", "warn", "no data field in mesh message", 0);
-        return;
-    }
-
-    gsize decoded_len = 0;
-    guchar *decoded = g_base64_decode(b64, &decoded_len);
-    g_free(b64);
-
-    if (!decoded || decoded_len < 16) {
-        emit_telemetry("mesh_upload", "warn", "mesh data too small", 0);
-        g_free(decoded);
-        return;
-    }
-
-    int vertex_count = get_int(obj, "vertexCount", 0);
-    if (vertex_count <= 0)
-        vertex_count = (int)(decoded_len / (4 * sizeof(float)));
-
-    glBindBuffer(GL_ARRAY_BUFFER, state->warp_vbo);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)decoded_len, decoded, GL_DYNAMIC_DRAW);
-    state->warp_vertex_count = vertex_count;
-    g_free(decoded);
-
-    emit_telemetry("mesh_upload", "info", "mesh uploaded", 1);
-}
-
-/* ── Render frame (three-pass pipeline) ────────────────────────────── */
-
-static void
-render_frame(HelperState *state, double time_value,
-             double zoom, double rot, double dx, double dy, double decay_val,
-             double energy, double bass, double mid, double high,
-             bool warp_in_shader, double warp_amount, double warp_speed, double warp_scale, int warp_type)
-{
-    if (!state->initialized || !state->program_ready)
-        return;
-
-    const int width = state->width > 0 ? state->width : 1;
-    const int height = state->height > 0 ? state->height : 1;
-    const int stride = state->stride > 0 ? state->stride : width * 4;
-    const gsize pixel_count = (gsize)stride * (gsize)height;
-
-    gint64 render_start = g_get_monotonic_time();
-
-    glViewport(0, 0, width, height);
-
-    int src_fbo = state->current_fbo;
-    int dst_fbo = 1 - src_fbo;
-
-    /* ── Pass 1: Draw initial content into dst FBO ─────────────────── */
-    PERF_BEGIN(draw_pass);
-    glBindFramebuffer(GL_FRAMEBUFFER, state->fbo[dst_fbo]);
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-
-    glUseProgram(state->draw_program);
-    if (state->draw_time_uniform >= 0)
-        glUniform1f(state->draw_time_uniform, (GLfloat)time_value);
-    if (state->draw_energy_uniform >= 0)
-        glUniform1f(state->draw_energy_uniform, (GLfloat)energy);
-    if (state->draw_bass_uniform >= 0)
-        glUniform1f(state->draw_bass_uniform, (GLfloat)bass);
-    if (state->draw_mid_uniform >= 0)
-        glUniform1f(state->draw_mid_uniform, (GLfloat)mid);
-    if (state->draw_high_uniform >= 0)
-        glUniform1f(state->draw_high_uniform, (GLfloat)high);
-    if (state->draw_resolution_uniform >= 0)
-        glUniform2f(state->draw_resolution_uniform, (GLfloat)width, (GLfloat)height);
-
-    glBindBuffer(GL_ARRAY_BUFFER, state->draw_vbo);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), (void *)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), (void *)(2 * sizeof(GLfloat)));
-    glDrawArrays(GL_TRIANGLES, 0, FULLSCREEN_QUAD_VERTEX_COUNT);
-    glDisableVertexAttribArray(0);
-    glDisableVertexAttribArray(1);
-    PERF_END(draw_pass);
-
-    /* ── Pass 2: Warp — sample src FBO through displaced mesh into dst FBO ── */
-    /* Blend warp result over the draw result for feedback accumulation */
-    PERF_BEGIN(warp_pass);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    glUseProgram(state->warp_program);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, state->fbo_tex[src_fbo]);
-    if (state->warp_prev_frame_uniform >= 0)
-        glUniform1i(state->warp_prev_frame_uniform, 0);
-    if (state->warp_decay_uniform >= 0)
-        glUniform1f(state->warp_decay_uniform, (GLfloat)decay_val);
-    if (state->warp_time_uniform >= 0)
-        glUniform1f(state->warp_time_uniform, (GLfloat)time_value);
-    if (state->warp_energy_uniform >= 0)
-        glUniform1f(state->warp_energy_uniform, (GLfloat)energy);
-    if (state->warp_amount_uniform >= 0)
-        glUniform1f(state->warp_amount_uniform, (GLfloat)warp_amount);
-    if (state->warp_speed_uniform >= 0)
-        glUniform1f(state->warp_speed_uniform, (GLfloat)warp_speed);
-    if (state->warp_scale_uniform >= 0)
-        glUniform1f(state->warp_scale_uniform, (GLfloat)warp_scale);
-    if (state->warp_type_uniform >= 0)
-        glUniform1f(state->warp_type_uniform, (GLfloat)warp_type);
-    if (state->warp_in_shader_uniform >= 0)
-        glUniform1f(state->warp_in_shader_uniform, warp_in_shader ? 1.0f : 0.0f);
-
-    glBindBuffer(GL_ARRAY_BUFFER, state->warp_vbo);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), (void *)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), (void *)(2 * sizeof(GLfloat)));
-    glDrawArrays(GL_TRIANGLES, 0, state->warp_vertex_count);
-    glDisableVertexAttribArray(0);
-    glDisableVertexAttribArray(1);
-
-    glDisable(GL_BLEND);
-    PERF_END(warp_pass);
-
-    /* ── Pass 3: Composite — read dst FBO, render to pbuffer for readback ── */
-    PERF_BEGIN(composite_pass);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-
-    glUseProgram(state->comp_program);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, state->fbo_tex[dst_fbo]);
-    if (state->comp_warp_output_uniform >= 0)
-        glUniform1i(state->comp_warp_output_uniform, 0);
-    if (state->comp_time_uniform >= 0)
-        glUniform1f(state->comp_time_uniform, (GLfloat)time_value);
-    if (state->comp_energy_uniform >= 0)
-        glUniform1f(state->comp_energy_uniform, (GLfloat)energy);
-    if (state->comp_bass_uniform >= 0)
-        glUniform1f(state->comp_bass_uniform, (GLfloat)bass);
-    if (state->comp_mid_uniform >= 0)
-        glUniform1f(state->comp_mid_uniform, (GLfloat)mid);
-    if (state->comp_high_uniform >= 0)
-        glUniform1f(state->comp_high_uniform, (GLfloat)high);
-    if (state->comp_decay_uniform >= 0)
-        glUniform1f(state->comp_decay_uniform, (GLfloat)decay_val);
-
-    glBindBuffer(GL_ARRAY_BUFFER, state->comp_vbo);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), (void *)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), (void *)(2 * sizeof(GLfloat)));
-    glDrawArrays(GL_TRIANGLES, 0, FULLSCREEN_QUAD_VERTEX_COUNT);
-    glDisableVertexAttribArray(0);
-    glDisableVertexAttribArray(1);
-
-    /* Swap ping-pong */
-    state->current_fbo = dst_fbo;
-    PERF_END(composite_pass);
-
-    glFinish();
-    gint64 render_end = g_get_monotonic_time();
-    gint64 render_us = render_end - render_start;
-    gint64 readback_start = render_end;
-
-    /* ── Readback ──────────────────────────────────────────────────── */
-    if (state->shm_socket_path) {
-#ifdef __linux__
-        int memfd = memfd_create("milkdrop-frame", MFD_CLOEXEC);
-        if (memfd >= 0 && ftruncate(memfd, (off_t)pixel_count) == 0) {
-            void *mapped = mmap(NULL, pixel_count, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, 0);
-            if (mapped != MAP_FAILED) {
-                glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, mapped);
-
-                GLenum gl_err = glGetError();
-                if (gl_err != GL_NO_ERROR) {
-                    emit_telemetry("readback", "warn", "glReadPixels error", 0);
-                    munmap(mapped, pixel_count);
-                    close(memfd);
-                    return;
-                }
-
-                state->frame_count += 1;
-                if (!emit_frame_pixels_shm_fd(state, memfd, state->frame_count, width, height, stride)) {
-                    emit_frame_pixels_base64((const guchar *)mapped, pixel_count, state->frame_count, width, height, stride);
-                }
-                munmap(mapped, pixel_count);
-                close(memfd);
-                eglSwapBuffers(state->display, state->surface);
-                emit_frame_stat(state->frame_count, time_value, render_us,
-                                g_get_monotonic_time() - readback_start);
-                return;
+    if (message_has_type(obj, "preset-change")) {
+        gchar *path = get_string_dup(obj, "path");
+        json_object_unref(obj);
+        if (path) {
+            if (g_file_test(path, G_FILE_TEST_IS_REGULAR)) {
+                g_free(state->current_preset_path);
+                state->current_preset_path = path;
+                if (state->projectm)
+                    projectm_load_preset_file(state->projectm, path, false);
+            } else {
+                emit_telemetry("preset", "warn", "preset-change path is not a regular file; ignoring", 0);
+                g_free(path);
             }
         }
-        if (memfd >= 0)
-            close(memfd);
-#endif
+        return MSG_LOOP_CONTINUE;
     }
 
-    if (pixel_count > state->pixel_buffer_size || !state->pixel_buffer) {
-        emit_telemetry("readback", "warn", "pixel buffer too small", 0);
-        return;
-    }
-    guchar *pixels = state->pixel_buffer;
-    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-
-    GLenum gl_err = glGetError();
-    if (gl_err != GL_NO_ERROR) {
-        emit_telemetry("readback", "warn", "glReadPixels error", 0);
-        return;
+    /* Backward-compat: ignore compile-default / compile-shaders / mesh */
+    if (message_has_type(obj, "compile-default") ||
+        message_has_type(obj, "compile-shaders") ||
+        message_has_type(obj, "mesh")) {
+        json_object_unref(obj);
+        return MSG_LOOP_CONTINUE;
     }
 
-    eglSwapBuffers(state->display, state->surface);
-    state->frame_count += 1;
-    emit_frame_pixels_base64(pixels, pixel_count, state->frame_count, width, height, stride);
-    emit_frame_stat(state->frame_count, time_value, render_us,
-                    g_get_monotonic_time() - readback_start);
+    if (message_has_type(obj, "frame")) {
+        double time_value = get_double(obj, "time", 0.0);
+        gchar *preset_path = get_string_dup(obj, "presetPath");
+        GLfloat pcm_left[PCM_SAMPLE_COUNT];
+        GLfloat pcm_right[PCM_SAMPLE_COUNT];
+        int pl = parse_pcm_data(obj, "pcmLeft", pcm_left);
+        int pr = parse_pcm_data(obj, "pcmRight", pcm_right);
+        int pcm_count = pl >= pr ? pl : pr;
+        json_object_unref(obj);
+        render_frame(state, time_value, pcm_left, pcm_right, pcm_count,
+                     preset_path ? preset_path : state->current_preset_path);
+        g_free(preset_path);
+        return MSG_LOOP_CONTINUE;
+    }
+
+    json_object_unref(obj);
+    return MSG_LOOP_CONTINUE;
 }
-
-/* ── Main loop ─────────────────────────────────────────────────────── */
 
 static void
 parse_argv(int argc, char **argv, HelperState *state)
@@ -985,6 +924,10 @@ parse_argv(int argc, char **argv, HelperState *state)
         if (g_str_equal(argv[i], "--shm-socket-path") && i + 1 < argc) {
             g_free(state->shm_socket_path);
             state->shm_socket_path = g_strdup(argv[i + 1]);
+            i++;
+        } else if (g_str_equal(argv[i], "--texture-path") && i + 1 < argc) {
+            g_free(state->texture_search_path);
+            state->texture_search_path = g_strdup(argv[i + 1]);
             i++;
         }
     }
@@ -997,10 +940,17 @@ main(int argc, char **argv)
         .display = EGL_NO_DISPLAY,
         .context = EGL_NO_CONTEXT,
         .surface = EGL_NO_SURFACE,
+        .projectm = NULL,
+        .current_preset_path = NULL,
+        .texture_search_path = NULL,
         .shm_socket_path = NULL,
         .shm_conn = NULL,
         .pixel_buffer = NULL,
         .pixel_buffer_size = 0,
+        .shm_fd = {-1, -1},
+        .shm_map = {NULL, NULL},
+        .shm_map_size = 0,
+        .shm_cur = 0,
     };
 
     parse_argv(argc, argv, &state);
@@ -1009,82 +959,16 @@ main(int argc, char **argv)
     size_t line_capacity = 0;
     while (getline(&line, &line_capacity, stdin) != -1) {
         JsonObject *obj = parse_message_line(line);
-        if (!obj) {
+        if (!obj)
             continue;
-        }
-
-        if (message_has_type(obj, "shutdown")) {
-            json_object_unref(obj);
+        if (dispatch_stdin_message(obj, &state) == MSG_LOOP_BREAK)
             break;
-        }
-
-        if (message_has_type(obj, "init")) {
-            int width = get_int(obj, "width", 1);
-            int height = get_int(obj, "height", 1);
-            json_object_unref(obj);
-            if (!initialize_egl(&state, width, height))
-                break;
-            continue;
-        }
-
-        if (message_has_type(obj, "compile-default")) {
-            json_object_unref(obj);
-            if (!compile_default_program(&state))
-                break;
-            continue;
-        }
-
-        if (message_has_type(obj, "compile-shaders")) {
-            gchar *draw_fs = get_string_dup(obj, "draw");
-            gchar *warp_fs = get_string_dup(obj, "warp");
-            gchar *comp_fs = get_string_dup(obj, "composite");
-            json_object_unref(obj);
-            bool ok = compile_custom_program(&state, draw_fs, warp_fs, comp_fs);
-            g_free(draw_fs);
-            g_free(warp_fs);
-            g_free(comp_fs);
-            if (!ok)
-                break;
-            continue;
-        }
-
-        if (message_has_type(obj, "mesh")) {
-            upload_mesh(&state, obj);
-            json_object_unref(obj);
-            continue;
-        }
-
-        if (message_has_type(obj, "frame")) {
-            double time_value = get_double(obj, "time", 0.0);
-            double zoom       = get_double(obj, "zoom", 1.0);
-            double rot        = get_double(obj, "rot", 0.0);
-            double dx         = get_double(obj, "dx", 0.0);
-            double dy         = get_double(obj, "dy", 0.0);
-            double decay_val  = get_double(obj, "decay", 0.98);
-            double energy     = get_double(obj, "energy", 0.0);
-            double bass       = get_double(obj, "bass", 0.0);
-            double mid        = get_double(obj, "mid", 0.0);
-            double high       = get_double(obj, "high", 0.0);
-            bool warp_in_shader = json_object_has_member(obj, "warpInShader") &&
-                json_object_get_boolean_member(obj, "warpInShader");
-            double warp_amount = get_double(obj, "warpAmount", 0.0);
-            double warp_speed  = get_double(obj, "warpSpeed", 1.0);
-            double warp_scale  = get_double(obj, "warpScale", 1.0);
-            int warp_type = get_int(obj, "warpType", 0);
-            if (warp_type < 0) warp_type = 0;
-            if (warp_type > 2) warp_type = 2;
-            json_object_unref(obj);
-            render_frame(&state, time_value, zoom, rot, dx, dy, decay_val,
-                         energy, bass, mid, high,
-                         warp_in_shader, warp_amount, warp_speed, warp_scale, warp_type);
-            continue;
-        }
-
-        json_object_unref(obj);
     }
-
     free(line);
+
     g_free(state.shm_socket_path);
+    g_free(state.current_preset_path);
+    g_free(state.texture_search_path);
     shutdown_helper(&state);
     return 0;
 }

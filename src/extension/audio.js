@@ -1,371 +1,276 @@
 import GLib from 'gi://GLib';
 import Gst from 'gi://Gst?version=1.0';
+import GstApp from 'gi://GstApp?version=1.0';
 
-const SPECTRUM_THRESHOLD_DB = -80;
-const FEATURE_DECAY = 0.82;
-const FEATURE_SMOOTHING = 0.35;
-const SPECTRUM_BANDS = 24;
-const SPECTRUM_INTERVAL_NS = 50_000_000;
-const BEAT_HISTORY_MS = 1000;
-const BEAT_COOLDOWN_MS = 100;
-const BEAT_WARMUP_FRAMES = 5;
-// History size and cooldown are derived from SPECTRUM_INTERVAL_NS so wall-clock behaviour is stable if the interval changes.
-// Beat detection operates in linear amplitude space (not dB-normalized) so
-// transients that are significant in real amplitude trigger reliably.
-const BEAT_NOISE_FLOOR = 0.001;
-const BEAT_THRESHOLD_LOW = 1.2;
-const BEAT_THRESHOLD_HIGH = 1.55;
-const BEAT_THRESHOLD_VARIANCE_SLOPE = -15;
-const SPECTRUM_INTERVAL_MS = SPECTRUM_INTERVAL_NS / 1_000_000;
-const BEAT_HISTORY_SIZE = Math.max(5, Math.ceil(BEAT_HISTORY_MS / SPECTRUM_INTERVAL_MS));
-const BEAT_COOLDOWN_FRAMES = Math.max(1, Math.ceil(BEAT_COOLDOWN_MS / SPECTRUM_INTERVAL_MS));
-const SIGNAL_TIMEOUT_USEC = 750000;
+const SIGNAL_TIMEOUT_USEC = 750_000;
 const DEFAULT_PULSE_MONITOR = '@DEFAULT_MONITOR@';
 const DEFAULT_MAX_PIPELINE_RESTARTS = 3;
 const RESTART_WINDOW_USEC = 15_000_000;
 const RESTART_DELAY_MSEC = 400;
 const DEFAULT_SOURCE_REPROBE_DELAY_MSEC = 2500;
 const MIN_SOURCE_REPROBE_DELAY_MSEC = 250;
-const REGEX_FALLBACK_LOG_INTERVAL = 120;
-const PARSER_ERROR_LOG_INTERVAL = 120;
-const MAGNITUDE_REGEX = /magnitude=\((?:float|double)\)\{([^}]*)\}/;
+const MAX_REPROBE_DELAY_MSEC = 60_000;
+const MAX_REPROBE_FAILURES = 10;
+const BUS_POLL_MAX_MESSAGES = 20;
+const SETTINGS_DEBOUNCE_MSEC = 500;
+const PCM_SAMPLES = 576;
+const STUB_SOURCE = {source: 'stub', element: 'audiotestsrc wave=silence is-live=true'};
+const PIPELINE_KEYS = new Set(['audio-source', 'audio-restart-max-attempts', 'audio-reprobe-delay-ms']);
 
 let gstInitialized = false;
 
-function ensureGstInitialized() {
-    if (gstInitialized)
-        return;
-
-    Gst.init(null);
-    gstInitialized = true;
-}
-
-function clamp01(value) {
-    return Math.max(0, Math.min(1, value));
-}
-
-function normalizedToLinear(n) {
-    if (n <= 0)
-        return 0;
-    return Math.pow(10, (n * Math.abs(SPECTRUM_THRESHOLD_DB) + SPECTRUM_THRESHOLD_DB) / 20);
-}
-
-function average(values) {
-    if (!values || values.length === 0)
-        return 0;
-
-    let sum = 0;
-    for (let i = 0; i < values.length; i++)
-        sum += values[i];
-    return sum / values.length;
-}
-
-function averageRange(values, start, end) {
-    if (!values || values.length === 0 || end <= start)
-        return 0;
-
-    let sum = 0;
-    let count = 0;
-    for (let i = start; i < end; i++) {
-        sum += values[i];
-        count += 1;
+function ensureGstInit() {
+    if (!gstInitialized) {
+        Gst.init(null);
+        gstInitialized = true;
     }
-    return count > 0 ? sum / count : 0;
 }
 
-function normalizeDecibels(value, thresholdDb) {
-    if (!Number.isFinite(value))
-        return 0;
-
-    return clamp01((value - thresholdDb) / Math.abs(thresholdDb));
-}
-
-function escapePipelineString(value) {
+function escapePipeline(value) {
     return `${value ?? ''}`.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
+}
+
+// Safely remove a GLib source id and return 0.
+function clearGSource(id) {
+    if (id)
+        GLib.source_remove(id);
+    return 0;
+}
+
+function gstTupleOrScalar(value, scalarOk) {
+    return Array.isArray(value) ? value : [scalarOk(value), value];
 }
 
 export class AudioEngine {
     constructor({settings = null, logger = console, onFallback = null} = {}) {
         this._settings = settings;
-        this._logger = logger;
+        this._log = logger;
         this._onFallback = onFallback;
         this._enabled = false;
         this._pipeline = null;
         this._bus = null;
+        this._appsink = null;
+        this._appSink = null;
         this._busPollId = 0;
         this._busWatchId = 0;
         this._busSignalHandlerId = 0;
         this._busSignalWatchEnabled = false;
         this._restartTimeoutId = 0;
-        this._sourceReprobeTimeoutId = 0;
+        this._reprobeTimeoutId = 0;
+        this._settingsDebounceId = 0;
+        this._appsinkPollId = 0;
         this._restartAttempts = 0;
         this._restartWindowStartUsec = 0;
-        this._activeSourceName = 'stub';
+        this._totalReprobeFailures = 0;
+        this._activeSource = 'stub';
         this._lastUpdateUsec = 0;
-        this._spectrumCount = 0;
-        this._spectrumEmptyCount = 0;
-        this._lastSnapshotUsec = 0;
-        this._spectrumParserMode = 'auto';
-        this._regexFallbackCount = 0;
-        this._fallbackNoticeKey = null;
-        this._parserErrorCount = 0;
-        this._variantErrorCount = 0;
-        this._features = this._buildDefaultFeatures('stub', false);
-        this._noSpectrumWarnId = 0;
-        this._loggedNonSpectrumElement = false;
-        this._energyHistory = new Array(BEAT_HISTORY_SIZE).fill(0);
-        this._bassHistory = new Array(BEAT_HISTORY_SIZE).fill(0);
-        this._historyCount = 0;
-        this._historyWriteIndex = 0;
-        this._beatCooldown = 0;
+        this._notifiedKeys = new Set();
+
+        this._features = this._defaultFeatures('stub');
     }
+
+    // ── Public API ──────────────────────────────────────────────
 
     enable() {
         if (this._enabled)
             return;
-
         this._enabled = true;
-        this._startPipeline();
+        this._startPipeline('enable');
     }
 
     disable() {
-        this._logger.info?.(`milkdrop audio disabling after ${this._spectrumCount} spectrum messages`);
         this._enabled = false;
-        this._spectrumCount = 0;
-        this._spectrumEmptyCount = 0;
-        this._lastSnapshotUsec = 0;
-        this._spectrumParserMode = 'auto';
-        this._regexFallbackCount = 0;
-        this._fallbackNoticeKey = null;
-        this._resetBeatHistory();
         this._stopPipeline();
-        this._features = this._buildDefaultFeatures(this._features.source, false);
+        this._features = this._defaultFeatures(this._features.source);
+        this._notifiedKeys.clear();
+        this._totalReprobeFailures = 0;
+        this._settingsDebounceId = clearGSource(this._settingsDebounceId);
+    }
+
+    get enabled() {
+        return this._enabled;
+    }
+
+    getDiagnostics() {
+        const availability = this._getSourceBackendAvailability();
+        const configuredSource = this._getSetting('string', 'audio-source', 'auto')?.trim?.() || 'auto';
+        return {
+            enabled: this._enabled,
+            configuredSource,
+            activeSource: this._activeSource,
+            autoMode: configuredSource === 'auto',
+            hasRecentSignal: this._hasRecentSignal(),
+            restartAttempts: this._restartAttempts,
+            totalReprobeFailures: this._totalReprobeFailures,
+            backends: availability,
+        };
     }
 
     getFeatures() {
-        const sensitivity = Math.max(0.1, this._getDoubleSetting('audio-sensitivity', 1.0));
-        const hasRecentSignal = this._enabled && this._hasRecentSignal();
-        if (!hasRecentSignal && this._historyCount > 0)
-            this._resetBeatHistory();
-
-        const features = {
-            ...this._features,
-            active: hasRecentSignal,
-            beat: hasRecentSignal ? this._features.beat : 0,
-        };
-
+        const active = this._enabled && this._hasRecentSignal();
+        const f = this._features;
         return {
-            source: features.source,
-            active: features.active,
-            energy: clamp01(features.energy * sensitivity),
-            bass: clamp01(features.bass * sensitivity),
-            mid: clamp01(features.mid * sensitivity),
-            high: clamp01(features.high * sensitivity),
-            beat: clamp01(features.beat),
-            decay: clamp01(features.decay * sensitivity),
+            source: f.source,
+            active,
+            pcmLeft: f.pcmLeft,
+            pcmRight: f.pcmRight,
         };
     }
 
-    _startPipeline() {
+    handleSettingsChanged(key) {
+        if (!this._enabled)
+            return;
+        if (typeof key === 'string' && !PIPELINE_KEYS.has(key))
+            return;
+
+        this._settingsDebounceId = clearGSource(this._settingsDebounceId);
+        if (this._log.info)
+            this._log.info(`milkdrop audio settings change: ${key || 'unknown'}`);
+        this._restartAttempts = 0;
+        this._restartWindowStartUsec = 0;
+        this._totalReprobeFailures = 0;
+        this._notifiedKeys.clear();
         this._stopPipeline();
-        ensureGstInitialized();
+        this._startPipeline('settings-changed');
+    }
 
-        const configuredSource = this._getStringSetting('audio-source', 'auto');
+    // ── Pipeline lifecycle ──────────────────────────────────────
+
+    _startPipeline(reason = 'unknown') {
+        this._stopPipeline();
+        ensureGstInit();
+
+        const configuredSource = this._getSetting('string', 'audio-source', 'auto');
         const sourceName = configuredSource?.trim?.() || 'auto';
-        const candidates = this._buildSourceCandidates(configuredSource);
-        const autoModeOnlyStub = sourceName === 'auto' && candidates.length === 1 && candidates[0].source === 'stub';
-
-        if (autoModeOnlyStub) {
-            this._notifyFallbackOnce(
-                'output-monitor-unavailable',
-                'Output Monitor Unavailable',
-                'No output monitor source found. Automatic mode will keep retrying and will not fall back to microphone capture.'
+        const candidates = this._buildCandidates(configuredSource);
+        if (this._log.info) {
+            this._log.info(
+                `milkdrop audio source plan configured="${sourceName}" candidates=[${candidates.map(c => c.source).join(', ')}]`
             );
         }
 
-        for (const candidate of candidates) {
-            const description = this._buildPipelineDescription(candidate.element);
+        if (sourceName === 'auto' && candidates.length === 1 && candidates[0].source === 'stub') {
+            this._notify('output-monitor-unavailable', 'Output Monitor Unavailable',
+                'No output monitor source found. Automatic mode will keep retrying and will not fall back to microphone capture.');
+        }
 
+        for (const c of candidates) {
+            const desc = this._pipelineDesc(c.element);
             try {
-                this._logger.info?.(`milkdrop audio pipeline starting: ${description}`);
-                const pipeline = Gst.parse_launch(description);
-                const stateChange = pipeline.set_state(Gst.State.PLAYING);
-                if (stateChange === Gst.StateChangeReturn.FAILURE) {
-                    this._logger.warn?.(`milkdrop audio pipeline state change failed for source=${candidate.source}`);
+                if (this._log.info)
+                    this._log.info(`milkdrop audio pipeline starting (${reason}): ${desc}`);
+                const pipeline = Gst.parse_launch(desc);
+                if (pipeline.set_state(Gst.State.PLAYING) === Gst.StateChangeReturn.FAILURE) {
+                        if (this._log.warn)
+                        this._log.warn(`milkdrop audio state change failed for source=${c.source}`);
                     pipeline.set_state(Gst.State.NULL);
                     continue;
                 }
 
                 this._pipeline = pipeline;
                 this._bus = pipeline.get_bus();
-                this._loggedNonSpectrumElement = false;
-                this._activeSourceName = candidate.source;
-                this._features = {
-                    ...this._features,
-                    source: candidate.source,
-                    active: false,
-                };
-                this._logger.warn?.(`milkdrop audio pipeline started source=${candidate.source} → PLAYING`);
-                if (candidate.source === 'stub') {
-                    this._scheduleSourceReprobe();
+                const appsinkElement = pipeline.get_by_name('waveform_appsink');
+                this._appSink = appsinkElement ? GstApp.AppSink.new(appsinkElement) : null;
+                if (this._appSink)
+                    this._startAppsinkPoll();
+                this._activeSource = c.source;
+                this._features.source = c.source;
+                this._features.active = false;
+                if (this._log.warn)
+                    this._log.warn(`milkdrop audio pipeline started source=${c.source} → PLAYING`);
+
+                if (c.source === 'stub') {
+                    this._scheduleReprobe();
                 } else {
-                    this._clearSourceReprobe();
-                    this._fallbackNoticeKey = null;
+                    this._clearReprobe();
                 }
-                this._attachBusListener();
-                this._noSpectrumWarnId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 2, () => {
-                    this._noSpectrumWarnId = 0;
-                    if (!this._enabled)
-                        return GLib.SOURCE_REMOVE;
-                    this._logger.warn?.(
-                        `milkdrop audio: 2s check fired enabled=${this._enabled} pipeline=${!!this._pipeline} spectrumCount=${this._spectrumCount}`
-                    );
-                    if (this._pipeline && this._spectrumCount === 0)
-                        this._logger.warn?.('milkdrop audio: no spectrum messages received after 2s');
-                    return GLib.SOURCE_REMOVE;
-                });
+
+                this._attachBus();
                 return;
-            } catch (error) {
-                this._logger.warn?.(`milkdrop audio pipeline candidate failed source=${candidate.source}: ${error.message}`);
+            } catch (e) {
+                if (this._log.warn)
+                    this._log.warn(`milkdrop audio candidate failed source=${c.source}: ${e.message}`);
             }
         }
 
-        this._activeSourceName = 'stub';
-        this._features = this._buildDefaultFeatures('stub', false);
+        // All candidates failed
+        this._activeSource = 'stub';
+        this._features = this._defaultFeatures('stub');
         this._pipeline = null;
         this._bus = null;
-        this._scheduleSourceReprobe();
-        this._notifyFallbackOnce('audio-unavailable', 'Audio Unavailable',
+        this._scheduleReprobe();
+        this._notify('audio-unavailable', 'Audio Unavailable',
             'Unable to start any audio source candidate. Visuals will run without audio reactivity.');
     }
 
-    _startBusPoll() {
-        if (this._busPollId)
-            GLib.source_remove(this._busPollId);
-
-        this._busPollId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
-            if (!this._enabled || !this._bus) {
-                this._busPollId = 0;
-                return GLib.SOURCE_REMOVE;
-            }
-            let message = this._bus.pop();
-            while (message) {
-                this._handleBusMessage(message);
-                message = this._bus.pop();
-            }
-            return GLib.SOURCE_CONTINUE;
-        });
-    }
-
-    _attachBusListener() {
-        this._detachBusListener();
-        if (!this._bus)
-            return;
-
-        if (typeof this._bus.add_watch === 'function') {
-            try {
-                const watchId = this._bus.add_watch(GLib.PRIORITY_DEFAULT, (bus, message) => {
-                    if (!this._enabled || !this._bus || bus !== this._bus) {
-                        this._busWatchId = 0;
-                        return GLib.SOURCE_REMOVE;
-                    }
-                    this._handleBusMessage(message);
-                    return GLib.SOURCE_CONTINUE;
-                });
-                if (watchId) {
-                    this._busWatchId = watchId;
-                    this._logger.warn?.('milkdrop audio bus watch attached (add_watch)');
-                    return;
-                }
-            } catch (error) {
-                this._logger.warn?.(`milkdrop audio add_watch unavailable: ${error.message}`);
-            }
-        }
-
-        if (typeof this._bus.add_signal_watch === 'function' && typeof this._bus.connect === 'function') {
-            try {
-                this._bus.add_signal_watch();
-                this._busSignalWatchEnabled = true;
-                this._busSignalHandlerId = this._bus.connect('message', (bus, message) => {
-                    if (!this._enabled || !this._bus || bus !== this._bus)
-                        return;
-                    this._handleBusMessage(message);
-                });
-                if (this._busSignalHandlerId) {
-                    this._logger.warn?.('milkdrop audio bus watch attached (signal)');
-                    return;
-                }
-                this._bus.remove_signal_watch?.();
-                this._busSignalWatchEnabled = false;
-            } catch (error) {
-                this._logger.warn?.(`milkdrop audio signal watch unavailable: ${error.message}`);
-                if (this._busSignalWatchEnabled) {
-                    try {
-                        this._bus.remove_signal_watch?.();
-                    } catch (_removeError) {}
-                    this._busSignalWatchEnabled = false;
-                }
-                this._busSignalHandlerId = 0;
-            }
-        }
-
-        this._logger.warn?.('milkdrop audio bus watch unavailable; using polling fallback');
-        this._startBusPoll();
-    }
-
-    _detachBusListener() {
-        if (this._busPollId) {
-            GLib.source_remove(this._busPollId);
-            this._busPollId = 0;
-        }
-
-        if (this._busWatchId) {
-            GLib.source_remove(this._busWatchId);
-            this._busWatchId = 0;
-        }
-
-        if (this._bus && this._busSignalHandlerId) {
-            try {
-                this._bus.disconnect(this._busSignalHandlerId);
-            } catch (_error) {}
-        }
-        this._busSignalHandlerId = 0;
-
-        if (this._bus && this._busSignalWatchEnabled) {
-            try {
-                this._bus.remove_signal_watch?.();
-            } catch (_error) {}
-        }
-        this._busSignalWatchEnabled = false;
-    }
-
     _stopPipeline() {
-        if (this._noSpectrumWarnId) {
-            GLib.source_remove(this._noSpectrumWarnId);
-            this._noSpectrumWarnId = 0;
-            this._logger.warn?.('milkdrop audio: 2s spectrum timeout cancelled (pipeline stopping)');
-        }
-        this._detachBusListener();
-
-        if (this._restartTimeoutId) {
-            GLib.source_remove(this._restartTimeoutId);
-            this._restartTimeoutId = 0;
-        }
-
-        this._clearSourceReprobe();
+        this._stopAppsinkPoll();
+        this._detachBus();
+        this._restartTimeoutId = clearGSource(this._restartTimeoutId);
+        this._clearReprobe();
 
         if (this._pipeline)
             this._pipeline.set_state(Gst.State.NULL);
-
         this._pipeline = null;
         this._bus = null;
+        this._appsink = null;
+        this._appSink = null;
         this._lastUpdateUsec = 0;
-        this._resetBeatHistory();
     }
 
-    _buildPipelineDescription(sourceElement) {
-        return `${sourceElement} ! queue leaky=downstream max-size-buffers=2 ! audioconvert ! audioresample ! spectrum bands=${SPECTRUM_BANDS} threshold=${SPECTRUM_THRESHOLD_DB} post-messages=true interval=${SPECTRUM_INTERVAL_NS} ! fakesink sync=false`;
+    _pipelineDesc(srcElement) {
+        return `${srcElement} ! queue leaky=downstream max-size-buffers=2 ! audioconvert ! audioresample ! appsink name=waveform_appsink emit-signals=false sync=false max-buffers=2 drop=true`;
     }
+
+    _scheduleRestart(reason) {
+        if (!this._enabled)
+            return;
+
+        const budget = this._getSetting('int', 'audio-restart-max-attempts', DEFAULT_MAX_PIPELINE_RESTARTS, 0, 100);
+        const now = GLib.get_monotonic_time();
+
+        if (!this._restartWindowStartUsec || now - this._restartWindowStartUsec > RESTART_WINDOW_USEC) {
+            this._restartWindowStartUsec = now;
+            this._restartAttempts = 0;
+        }
+
+        this._restartAttempts += 1;
+
+        if (this._restartAttempts > budget) {
+            if (this._log.warn)
+                this._log.warn('milkdrop audio restart budget exhausted; entering reprobe mode');
+            this._stopPipeline();
+            this._restartAttempts = 0;
+            this._restartWindowStartUsec = 0;
+            this._activeSource = 'stub';
+            this._features = this._defaultFeatures('stub');
+            this._totalReprobeFailures += 1;
+
+            if (this._isAutoMode() && this._totalReprobeFailures < MAX_REPROBE_FAILURES) {
+                this._scheduleSourceReprobe();
+                this._notify('audio-reprobe-mode', 'Audio Reprobe Mode',
+                    'Audio monitor source is currently unavailable. Automatic mode will keep retrying in the background.');
+            } else {
+                this._notify('audio-disabled', 'Audio Disabled',
+                    'Audio pipeline repeatedly failed and was disabled for safety. Visuals will continue without audio reactivity.');
+            }
+            return;
+        }
+
+        if (this._restartTimeoutId)
+            return;
+
+        if (this._log.warn)
+            this._log.warn(`milkdrop audio scheduling restart #${this._restartAttempts}: ${reason}`);
+        this._restartTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, RESTART_DELAY_MSEC, () => {
+            this._restartTimeoutId = 0;
+            if (this._enabled)
+                this._startPipeline('scheduled-restart');
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    // ── Source candidates ───────────────────────────────────────
 
     _getSourceBackendAvailability() {
         return {
@@ -375,621 +280,327 @@ export class AudioEngine {
         };
     }
 
-    _buildSourceCandidates(configuredSource) {
-        const sourceName = configuredSource?.trim?.() || 'auto';
-        const {hasPipewire, hasPulseSrc, hasAutoSource} = this._getSourceBackendAvailability();
+    _buildCandidates(configuredSource) {
+        const name = configuredSource?.trim?.() || 'auto';
+        const {hasPipewire: pw, hasPulseSrc: pa, hasAutoSource: auto} = this._getSourceBackendAvailability();
         const candidates = [];
 
-        this._logger.warn?.(`milkdrop audio source probe: pipewiresrc=${hasPipewire} pulsesrc=${hasPulseSrc} autoaudiosrc=${hasAutoSource} configured="${sourceName}"`);
+        if (this._log.warn)
+            this._log.warn(`milkdrop audio probe: pw=${pw} pa=${pa} auto=${auto} configured="${name}"`);
 
-        if (sourceName !== 'auto') {
-            const looksLikePulseMonitor = sourceName.endsWith('.monitor') || sourceName.startsWith('alsa_output.');
-            const preferredOrder = looksLikePulseMonitor ? ['pulse', 'pipewire'] : ['pipewire', 'pulse'];
+        if (name !== 'auto') {
+            const pulseFirst = name.endsWith('.monitor') || name.startsWith('alsa_output.');
+            const escaped = escapePipeline(name);
+            const order = pulseFirst ? ['pa', 'pw'] : ['pw', 'pa'];
 
-            for (const backend of preferredOrder) {
-                if (backend === 'pipewire' && hasPipewire) {
-                    candidates.push({
-                        source: `pipewire:${sourceName}`,
-                        element: `pipewiresrc target-object="${escapePipelineString(sourceName)}" autoconnect=true do-timestamp=true`,
-                    });
-                }
-                if (backend === 'pulse' && hasPulseSrc) {
-                    candidates.push({
-                        source: `pulse:${sourceName}`,
-                        element: `pulsesrc device="${escapePipelineString(sourceName)}"`,
-                    });
-                }
+            for (const b of order) {
+                if (b === 'pw' && pw)
+                    candidates.push({source: `pipewire:${name}`, element: `pipewiresrc target-object="${escaped}" autoconnect=true do-timestamp=true`});
+                if (b === 'pa' && pa)
+                    candidates.push({source: `pulse:${name}`, element: `pulsesrc device="${escaped}"`});
             }
 
-            if (candidates.length === 0) {
-                this._logger.warn?.('milkdrop audio capture unavailable: no backend available for explicit source');
-                candidates.push({
-                    source: 'stub',
-                    element: 'audiotestsrc wave=silence is-live=true',
-                });
-            }
-
-            return candidates;
+            return candidates.length > 0 ? candidates : [STUB_SOURCE];
         }
 
-        // Auto mode: monitor source captures output audio (what you hear).
-        if (hasPulseSrc) {
-            this._logger.warn?.(`milkdrop audio using pulsesrc output monitor: ${DEFAULT_PULSE_MONITOR}`);
-            candidates.push({
-                source: 'pulse:@DEFAULT_MONITOR@',
-                element: `pulsesrc device="${escapePipelineString(DEFAULT_PULSE_MONITOR)}"`,
-            });
+        // Auto mode: only monitor source (no mic fallback)
+        if (pa) {
+            candidates.push({source: 'pulse:@DEFAULT_MONITOR@', element: `pulsesrc device="${escapePipeline(DEFAULT_PULSE_MONITOR)}"`});
+        } else if (pw || auto) {
+            if (this._log.warn)
+                this._log.warn('milkdrop audio auto: monitor unavailable; mic fallbacks disabled');
         }
 
-        // Auto mode is intentionally strict: do not fall back to generic capture
-        // sources because WirePlumber may route those to microphone devices.
-        if (!hasPulseSrc && (hasPipewire || hasAutoSource)) {
-            this._logger.warn?.('milkdrop audio auto mode: monitor capture backend unavailable; microphone fallbacks are disabled');
-        }
-
-        if (candidates.length === 0) {
-            this._logger.warn?.('milkdrop audio capture unavailable: no output monitor source found');
-            candidates.push({
-                source: 'stub',
-                element: 'audiotestsrc wave=silence is-live=true',
-            });
-        }
-
-        return candidates;
+        return candidates.length > 0 ? candidates : [STUB_SOURCE];
     }
 
-    _handleBusMessage(message) {
-        switch (message.type) {
-        case Gst.MessageType.ELEMENT: {
-            const structure = message.get_structure();
-            const name = structure ? structure.get_name() : null;
-            if (name !== 'spectrum') {
-                if (!this._loggedNonSpectrumElement) {
-                    this._loggedNonSpectrumElement = true;
-                    this._logger.warn?.(`milkdrop audio: ELEMENT message structure name="${name ?? 'null'}" (expected "spectrum")`);
+    // ── Bus handling ────────────────────────────────────────────
+
+    _attachBus() {
+        this._detachBus();
+        if (!this._bus)
+            return;
+
+        // Strategy 1: add_watch
+        if (typeof this._bus.add_watch === 'function') {
+            try {
+                const id = this._bus.add_watch(GLib.PRIORITY_DEFAULT, (bus, msg) => {
+                    if (!this._enabled || bus !== this._bus) {
+                        this._busWatchId = 0;
+                        return GLib.SOURCE_REMOVE;
+                    }
+                    this._onBusMessage(msg);
+                    return GLib.SOURCE_CONTINUE;
+                });
+                if (id) {
+                    this._busWatchId = id;
+                        if (this._log.warn)
+                        this._log.warn('milkdrop audio bus: add_watch attached');
+                    return;
                 }
-                break;
+            } catch (e) {
+                if (this._log.warn)
+                    this._log.warn(`milkdrop audio add_watch unavailable: ${e.message}`);
             }
-            this._handleSpectrumMessage(message);
-            break;
         }
+
+        // Strategy 2: signal watch
+        if (typeof this._bus.add_signal_watch === 'function' && typeof this._bus.connect === 'function') {
+            try {
+                this._bus.add_signal_watch();
+                this._busSignalWatchEnabled = true;
+                this._busSignalHandlerId = this._bus.connect('message', (bus, msg) => {
+                    if (this._enabled && bus === this._bus)
+                        this._onBusMessage(msg);
+                });
+                if (this._busSignalHandlerId) {
+                        if (this._log.warn)
+                        this._log.warn('milkdrop audio bus: signal watch attached');
+                    return;
+                }
+                this._bus.remove_signal_watch?.();
+                this._busSignalWatchEnabled = false;
+            } catch (e) {
+                if (this._log.warn)
+                    this._log.warn(`milkdrop audio signal watch unavailable: ${e.message}`);
+                if (this._busSignalWatchEnabled) {
+                    try { this._bus.remove_signal_watch?.(); } catch (_) {}
+                    this._busSignalWatchEnabled = false;
+                }
+                this._busSignalHandlerId = 0;
+            }
+        }
+
+        // Strategy 3: polling fallback
+        if (this._log.warn)
+            this._log.warn('milkdrop audio bus: using polling fallback');
+        this._startBusPoll();
+    }
+
+    _startBusPoll() {
+        this._busPollId = clearGSource(this._busPollId);
+        this._busPollId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
+            if (!this._enabled || !this._bus) {
+                this._busPollId = 0;
+                return GLib.SOURCE_REMOVE;
+            }
+            let msg = this._bus.pop();
+            let n = BUS_POLL_MAX_MESSAGES;
+            while (msg && n-- > 0) {
+                this._onBusMessage(msg);
+                msg = this._bus.pop();
+            }
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
+    _detachBus() {
+        this._busPollId = clearGSource(this._busPollId);
+        this._busWatchId = clearGSource(this._busWatchId);
+        if (this._bus && this._busSignalHandlerId) {
+            try { this._bus.disconnect(this._busSignalHandlerId); } catch (e) {
+                this._log.debug?.(`milkdrop audio bus disconnect error: ${e.message}`);
+            }
+        }
+        this._busSignalHandlerId = 0;
+        if (this._bus && this._busSignalWatchEnabled) {
+            try { this._bus.remove_signal_watch?.(); } catch (e) {
+                this._log.debug?.(`milkdrop audio bus remove_signal_watch error: ${e.message}`);
+            }
+        }
+        this._busSignalWatchEnabled = false;
+    }
+
+    _onBusMessage(message) {
+        switch (message.type) {
         case Gst.MessageType.ERROR: {
-            const [error, debug] = message.parse_error();
-            const errorMessage = error?.message ?? 'unknown error';
-            const debugMessage = debug ? ` debug=${debug}` : '';
-            this._logger.warn?.(`milkdrop audio bus error: ${errorMessage}${debugMessage}`);
-            this._resetBeatHistory();
-            this._features = this._buildDefaultFeatures(this._resolveActiveSourceName(), false);
+            const [err, dbg] = message.parse_error();
+            const msg = err?.message ?? 'unknown';
+            if (this._log.warn)
+                this._log.warn(`milkdrop audio bus error: ${msg}${dbg ? ` debug=${dbg}` : ''}`);
+            this._features = this._defaultFeatures(this._activeSource || 'stub');
             this._lastUpdateUsec = 0;
-            this._schedulePipelineRestart(debug ? `${errorMessage} (${debug})` : errorMessage);
+            this._scheduleRestart(dbg ? `${msg} (${dbg})` : msg);
             break;
         }
-        case Gst.MessageType.STATE_CHANGED: {
+        case Gst.MessageType.STATE_CHANGED:
             if (message.src === this._pipeline) {
-                const [, newState] = message.parse_state_changed();
-                this._logger.info?.(`milkdrop audio pipeline state → ${Gst.Element.state_get_name(newState)}`);
+                const [, s] = message.parse_state_changed();
+                if (this._log.info)
+                    this._log.info(`milkdrop audio state → ${Gst.Element.state_get_name(s)}`);
             }
             break;
-        }
         default:
             break;
         }
     }
 
-    _handleSpectrumMessage(message) {
-        if (!this._enabled)
+    // ── Appsink PCM waveform ────────────────────────────────────
+
+    _startAppsinkPoll() {
+        this._stopAppsinkPoll();
+        if (!this._appsink || !this._enabled)
             return;
-
-        const structure = message.get_structure();
-        if (!structure || structure.get_name() !== 'spectrum')
-            return;
-
-        const bands = this._parseSpectrumBands(structure);
-        if (bands.length === 0) {
-            // Diagnostic: spectrum message received but parsing returned no bands → _features never updated (plan: audio monitor data renderer)
-            this._spectrumEmptyCount = (this._spectrumEmptyCount ?? 0) + 1;
-            if (this._spectrumEmptyCount === 1 || this._spectrumEmptyCount % 60 === 0)
-                this._logger.info?.(`milkdrop audio spectrum message ignored: bands.length=0 (parse failed or wrong format) count=${this._spectrumEmptyCount}`);
-            return;
-        }
-
-        const nowUsec = GLib.get_monotonic_time();
-        if (this._lastUpdateUsec && nowUsec - this._lastUpdateUsec >= SIGNAL_TIMEOUT_USEC)
-            this._resetBeatHistory();
-
-        const third = Math.max(1, Math.floor(bands.length / 3));
-        const midStart = third;
-        const highStart = third * 2;
-        const bass = averageRange(bands, 0, midStart);
-        const mid = averageRange(bands, midStart, highStart);
-        const high = averageRange(bands, highStart, bands.length);
-        const energy = average(bands);
-
-        // Convert to linear amplitude for beat detection — dB normalization
-        // compresses dynamic range so much that real transients (which are
-        // large in amplitude) appear as tiny variations in [0,1] space.
-        const beatEnergy = normalizedToLinear(energy);
-        const beatBass = normalizedToLinear(bass);
-        this._appendBeatHistory(beatEnergy, beatBass);
-
-        let beat = 0;
-        let beatDebug = null;
-        const beatDebugEnabled = GLib.getenv('MILKDROP_DEBUG_BEAT') === '1';
-        if (this._beatCooldown > 0) {
-            this._beatCooldown -= 1;
-        } else if (this._historyCount >= BEAT_WARMUP_FRAMES) {
-            const avgE = this._averageHistory(this._energyHistory);
-            const avgB = this._averageHistory(this._bassHistory);
-            const varE = this._varianceHistory(this._energyHistory, avgE);
-            const varB = this._varianceHistory(this._bassHistory, avgB);
-            // Use coefficient of variation (variance / mean²) so the adaptive
-            // threshold responds to *relative* dynamics, not absolute scale.
-            const cvSqE = avgE > 0 ? varE / (avgE * avgE) : 0;
-            const cvSqB = avgB > 0 ? varB / (avgB * avgB) : 0;
-            const threshE = Math.max(BEAT_THRESHOLD_LOW, Math.min(BEAT_THRESHOLD_HIGH, BEAT_THRESHOLD_VARIANCE_SLOPE * cvSqE + BEAT_THRESHOLD_HIGH));
-            const threshB = Math.max(BEAT_THRESHOLD_LOW, Math.min(BEAT_THRESHOLD_HIGH, BEAT_THRESHOLD_VARIANCE_SLOPE * cvSqB + BEAT_THRESHOLD_HIGH));
-            const needE = threshE * avgE;
-            const needB = threshB * avgB;
-            const energyBeat = (beatEnergy - BEAT_NOISE_FLOOR) > needE && avgE > BEAT_NOISE_FLOOR;
-            const bassBeat = (beatBass - BEAT_NOISE_FLOOR) > needB && avgB > BEAT_NOISE_FLOOR;
-            if (energyBeat || bassBeat) {
-                beat = 1;
-                this._beatCooldown = BEAT_COOLDOWN_FRAMES;
-            }
-            if (beatDebugEnabled)
-                beatDebug = { beatEnergy, beatBass, avgE, avgB, varE, varB, cvSqE, cvSqB, threshE, threshB, needE, needB, energyBeat, bassBeat, beat };
-        }
-
-        const decay = Math.max(energy, this._features.decay * FEATURE_DECAY);
-
-        this._spectrumCount += 1;
-
-        if (beatDebug && beatDebugEnabled) {
-            const d = beatDebug;
-            const show = d.beat === 1 || this._spectrumCount % 20 === 0;
-            if (show)
-                this._logger.warn?.(
-                    `milkdrop beat #${this._spectrumCount} beat=${d.beat} linE=${d.beatEnergy.toFixed(6)} linB=${d.beatBass.toFixed(6)} avgE=${d.avgE.toFixed(6)} avgB=${d.avgB.toFixed(6)} cvE=${d.cvSqE.toFixed(4)} cvB=${d.cvSqB.toFixed(4)} threshE=${d.threshE.toFixed(3)} threshB=${d.threshB.toFixed(3)} needE=${d.needE.toFixed(6)} needB=${d.needB.toFixed(6)} E_beat=${d.energyBeat} B_beat=${d.bassBeat}`
-                );
-        }
-
-        const sourceName = this._resolveActiveSourceName();
-        if (this._spectrumCount === 1) {
-            this._logger.warn?.(`milkdrop audio first spectrum received source=${sourceName} bands=${bands.length}`);
-            const rawStruct = structure?.to_string?.() ?? '';
-            this._logger.warn?.(`milkdrop audio first spectrum raw (first 300 chars): ${rawStruct.slice(0, 300)}`);
-        }
-
-        // Periodic audio snapshot every 5 seconds
-        if (nowUsec - this._lastSnapshotUsec >= 5_000_000) {
-            this._lastSnapshotUsec = nowUsec;
-            this._logger.debug?.(
-                `milkdrop audio snapshot #${this._spectrumCount} energy=${energy.toFixed(3)} bass=${bass.toFixed(3)} mid=${mid.toFixed(3)} high=${high.toFixed(3)} beat=${beat}`
-            );
-        }
-
-        const prevEnergy = this._features.energy;
-        const prevBass = this._features.bass;
-        const prevMid = this._features.mid;
-        const prevHigh = this._features.high;
-        this._features.source = sourceName;
-        this._features.active = true;
-        this._features.energy = this._smooth(prevEnergy, energy);
-        this._features.bass = this._smooth(prevBass, bass);
-        this._features.mid = this._smooth(prevMid, mid);
-        this._features.high = this._smooth(prevHigh, high);
-        this._features.beat = beat;
-        this._features.decay = decay;
-        this._lastUpdateUsec = nowUsec;
-
-        if (this._spectrumCount % 50 === 0) {
-            const out = this.getFeatures();
-            const rawStruct = structure?.to_string?.() ?? '';
-            const magnitudeSnippet = rawStruct.includes('magnitude=')
-                ? rawStruct.slice(rawStruct.indexOf('magnitude='), rawStruct.indexOf('magnitude=') + 120)
-                : '(no magnitude in structure)';
-            this._logger.warn?.(
-                `milkdrop audio sample #${this._spectrumCount} raw E=${energy.toFixed(3)} B=${bass.toFixed(3)} M=${mid.toFixed(3)} H=${high.toFixed(3)} → out E=${(out.energy ?? 0).toFixed(3)} B=${(out.bass ?? 0).toFixed(3)} M=${(out.mid ?? 0).toFixed(3)} H=${(out.high ?? 0).toFixed(3)} magnitude_snippet=${magnitudeSnippet}`
-            );
-        }
-    }
-
-    _parseSpectrumBands(structure) {
-        if (this._spectrumParserMode === 'structured') {
-            const bands = this._getMagnitudeFromStructure(structure) ?? [];
-            if (bands.length >= SPECTRUM_BANDS)
-                return bands;
-            const fromString = this._parseSpectrumBandsFromString(structure?.to_string?.() ?? '');
-            if (fromString.length >= SPECTRUM_BANDS) {
-                this._spectrumParserMode = 'regex-fallback';
-                this._logger.warn?.('milkdrop audio structured parser returned few bands; using regex parser');
-                this._recordRegexFallbackUse(true);
-                return fromString;
-            }
-            return bands;
-        }
-
-        if (this._spectrumParserMode === 'regex-fallback') {
-            const parsed = this._parseSpectrumBandsFromString(structure?.to_string?.() ?? '');
-            this._recordRegexFallbackUse(parsed.length > 0);
-            return parsed;
-        }
-
-        const fromStructure = this._getMagnitudeFromStructure(structure);
-        if (fromStructure && fromStructure.length >= SPECTRUM_BANDS) {
-            this._spectrumParserMode = 'structured';
-            return fromStructure;
-        }
-        if (fromStructure && fromStructure.length > 0) {
-            const fromString = this._parseSpectrumBandsFromString(structure?.to_string?.() ?? '');
-            if (fromString.length >= SPECTRUM_BANDS) {
-                this._spectrumParserMode = 'regex-fallback';
-                this._logger.warn?.('milkdrop audio structured parser returned few bands; using regex parser');
-                this._recordRegexFallbackUse(true);
-                return fromString;
-            }
-            this._spectrumParserMode = 'structured';
-            return fromStructure;
-        }
-
-        this._spectrumParserMode = 'regex-fallback';
-        this._logger.warn?.('milkdrop audio falling back to regex spectrum parser; performance may be reduced');
-        const parsed = this._parseSpectrumBandsFromString(structure?.to_string?.() ?? '');
-        this._recordRegexFallbackUse(parsed.length > 0);
-        return parsed;
-    }
-
-    _parseSpectrumBandsFromString(structureString) {
-        const match = MAGNITUDE_REGEX.exec(structureString);
-        if (!match)
-            return [];
-
-        const values = [];
-        const payload = match[1];
-        let start = 0;
-        for (let i = 0; i <= payload.length; i++) {
-            if (i !== payload.length && payload[i] !== ',')
-                continue;
-            const parsed = Number.parseFloat(payload.slice(start, i));
-            const normalized = normalizeDecibels(parsed, SPECTRUM_THRESHOLD_DB);
-            if (Number.isFinite(normalized))
-                values.push(normalized);
-            start = i + 1;
-        }
-        return values;
-    }
-
-    _recordRegexFallbackUse(hadBands) {
-        if (!hadBands)
-            return;
-
-        this._regexFallbackCount += 1;
-        if (this._regexFallbackCount === 1 || this._regexFallbackCount % REGEX_FALLBACK_LOG_INTERVAL === 0) {
-            this._logger.warn?.(
-                `milkdrop audio regex spectrum fallback active count=${this._regexFallbackCount}`
-            );
-        }
-    }
-
-    _getMagnitudeFromStructure(structure) {
-        try {
-            if (typeof structure.get_array === 'function') {
-                const arr = structure.get_array('magnitude');
-                if (!arr || arr.length === 0)
-                    return null;
-                const channelBands = Array.from(arr)
-                    .map(value => this._extractFloatsFromVariant(value))
-                    .filter(values => values.length > 0);
-                if (channelBands.length === 0)
-                    return null;
-                const isMultiChannel = channelBands.length > 1 && channelBands.some(values => values.length > 1);
-                if (isMultiChannel)
-                    return this._mergeChannelBands(channelBands);
-                if (channelBands.length > 1)
-                    return channelBands.map(values => normalizeDecibels(values[0], SPECTRUM_THRESHOLD_DB)).filter(Number.isFinite);
-                return channelBands[0].map(v => normalizeDecibels(v, SPECTRUM_THRESHOLD_DB)).filter(Number.isFinite);
-            }
-            const value = structure.get_value?.('magnitude');
-            if (value && typeof value.n_children === 'function') {
-                const n = value.n_children();
-                const channelBands = [];
-                for (let i = 0; i < n; i++) {
-                    const child = value.get_child(i);
-                    if (child === null)
-                        continue;
-                    const vals = this._extractFloatsFromVariant(child);
-                    if (vals.length > 0)
-                        channelBands.push(vals);
-                }
-                if (channelBands.length === 0)
-                    return null;
-                return this._mergeChannelBands(channelBands);
-            }
-        } catch (error) {
-            this._parserErrorCount += 1;
-            if (this._parserErrorCount === 1 || this._parserErrorCount % PARSER_ERROR_LOG_INTERVAL === 0)
-                this._logger.debug?.(`milkdrop audio structured parser error #${this._parserErrorCount}: ${error.message}`);
-        }
-        return null;
-    }
-
-    _extractFloatsFromVariant(variant) {
-        const out = [];
-        try {
-            if (typeof variant?.n_children === 'function') {
-                const n = variant.n_children();
-                const getChild = typeof variant.get_child_value === 'function' ? i => variant.get_child_value(i) : i => variant.get_child(i);
-                for (let i = 0; i < n; i++) {
-                    const c = getChild.call(variant, i);
-                    if (c !== null && c !== undefined) {
-                        const v = Number(typeof c?.get_double === 'function' ? c.get_double() : c);
-                        if (Number.isFinite(v))
-                            out.push(v);
-                    }
-                }
-                return out;
-            }
-            if (Array.isArray(variant))
-                return variant.map(v => Number(v)).filter(Number.isFinite);
-            const v = Number(variant?.get_double?.() ?? variant);
-            if (Number.isFinite(v))
-                out.push(v);
-        } catch (error) {
-            this._variantErrorCount += 1;
-            if (this._variantErrorCount === 1 || this._variantErrorCount % PARSER_ERROR_LOG_INTERVAL === 0)
-                this._logger.debug?.(`milkdrop audio variant parser error #${this._variantErrorCount}: ${error.message}`);
-        }
-        return out;
-    }
-
-    _mergeChannelBands(channelBands) {
-        const len = Math.min(...channelBands.map(b => b.length));
-        if (len === 0)
-            return [];
-        const merged = [];
-        for (let i = 0; i < len; i++) {
-            let sum = 0;
-            let count = 0;
-            for (const ch of channelBands) {
-                if (Number.isFinite(ch[i])) {
-                    sum += ch[i];
-                    count += 1;
-                }
-            }
-            merged.push(normalizeDecibels(count > 0 ? sum / count : 0, SPECTRUM_THRESHOLD_DB));
-        }
-        return merged.filter(Number.isFinite);
-    }
-
-    _resolveActiveSourceName() {
-        return this._activeSourceName || 'stub';
-    }
-
-    _appendBeatHistory(energy, bass) {
-        this._energyHistory[this._historyWriteIndex] = energy;
-        this._bassHistory[this._historyWriteIndex] = bass;
-        this._historyWriteIndex = (this._historyWriteIndex + 1) % BEAT_HISTORY_SIZE;
-        this._historyCount = Math.min(this._historyCount + 1, BEAT_HISTORY_SIZE);
-    }
-
-    _averageHistory(history) {
-        if (this._historyCount === 0)
-            return 0;
-
-        let sum = 0;
-        for (let i = 0; i < this._historyCount; i++)
-            sum += history[i];
-        return sum / this._historyCount;
-    }
-
-    _varianceHistory(history, mean) {
-        if (this._historyCount === 0)
-            return 0;
-
-        let sum = 0;
-        for (let i = 0; i < this._historyCount; i++) {
-            const delta = history[i] - mean;
-            sum += delta * delta;
-        }
-        return sum / this._historyCount;
-    }
-
-    _schedulePipelineRestart(reason) {
-        if (!this._enabled)
-            return;
-
-        const restartBudget = this._getIntSetting(
-            'audio-restart-max-attempts',
-            DEFAULT_MAX_PIPELINE_RESTARTS,
-            0,
-            100
-        );
-        const nowUsec = GLib.get_monotonic_time();
-        if (!this._restartWindowStartUsec || nowUsec - this._restartWindowStartUsec > RESTART_WINDOW_USEC) {
-            this._restartWindowStartUsec = nowUsec;
-            this._restartAttempts = 0;
-        }
-
-        this._restartAttempts += 1;
-        if (this._restartAttempts > restartBudget) {
-            this._logger.warn?.('milkdrop audio restart budget exhausted; entering monitor reprobe mode');
-            this._stopPipeline();
-            this._activeSourceName = 'stub';
-            this._features = this._buildDefaultFeatures('stub', false);
-            if (this._shouldAutoReprobe()) {
-                this._scheduleSourceReprobe();
-                this._notifyFallbackOnce(
-                    'audio-reprobe-mode',
-                    'Audio Reprobe Mode',
-                    'Audio monitor source is currently unavailable. Automatic mode will keep retrying in the background.'
-                );
-            } else {
-                this._notifyFallbackOnce(
-                    'audio-disabled',
-                    'Audio Disabled',
-                    'Audio pipeline repeatedly failed and was disabled for safety. Visuals will continue without audio reactivity.'
-                );
-            }
-            return;
-        }
-
-        if (this._restartTimeoutId)
-            return;
-
-        this._logger.warn?.(`milkdrop audio scheduling pipeline restart #${this._restartAttempts}: ${reason}`);
-        this._restartTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, RESTART_DELAY_MSEC, () => {
-            this._restartTimeoutId = 0;
-            if (!this._enabled)
+        const appSink = GstApp.AppSink.new(null);
+        this._appsinkPollId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 20, () => {
+            if (!this._enabled || !this._appsink) {
+                this._appsinkPollId = 0;
                 return GLib.SOURCE_REMOVE;
-
-            this._startPipeline();
-            return GLib.SOURCE_REMOVE;
+            }
+            try {
+                const sample = appSink.try_pull_sample(0);
+                if (sample)
+                    this._readPcm(sample);
+            } catch (e) {
+                // Ignore pull errors
+            }
+            return GLib.SOURCE_CONTINUE;
         });
     }
 
-    _hasRecentSignal() {
-        if (!this._lastUpdateUsec)
-            return false;
-
-        return GLib.get_monotonic_time() - this._lastUpdateUsec < SIGNAL_TIMEOUT_USEC;
+    _stopAppsinkPoll() {
+        this._appsinkPollId = clearGSource(this._appsinkPollId);
     }
 
-    _smooth(previous, next) {
-        return previous + (next - previous) * FEATURE_SMOOTHING;
-    }
-
-    _buildDefaultFeatures(source, active) {
-        return {
-            source,
-            active,
-            energy: 0,
-            bass: 0,
-            mid: 0,
-            high: 0,
-            beat: 0,
-            decay: 0,
-        };
-    }
-
-    _resetBeatHistory() {
-        this._energyHistory = new Array(BEAT_HISTORY_SIZE).fill(0);
-        this._bassHistory = new Array(BEAT_HISTORY_SIZE).fill(0);
-        this._historyCount = 0;
-        this._historyWriteIndex = 0;
-        this._beatCooldown = 0;
-        this._features = {
-            ...this._features,
-            beat: 0,
-        };
-    }
-
-    _clearSourceReprobe() {
-        if (!this._sourceReprobeTimeoutId)
+    _readPcm(sample) {
+        const buffer = sample.get_buffer();
+        if (!buffer)
+            return;
+        const [ok, map] = buffer.map(Gst.MapFlags.READ);
+        if (!ok)
             return;
 
-        GLib.source_remove(this._sourceReprobeTimeoutId);
-        this._sourceReprobeTimeoutId = 0;
+        try {
+            const caps = sample.get_caps();
+            const st = caps?.get_structure(0);
+            if (!st) return;
+
+            const [okF, fmt] = gstTupleOrScalar(st.get_string('format'), v => v !== null);
+            const [okC, ch] = gstTupleOrScalar(st.get_int('channels'), v => v !== null);
+            if (!okF || !okC) return;
+
+            const isFloat = fmt === 'F32LE';
+            if (!isFloat && fmt !== 'S16LE') return;
+
+            const bps = isFloat ? 4 : 2;
+            const count = (map.size / (bps * ch)) | 0;
+            if (count <= 0) return;
+
+            const raw = map.data.buffer ?? map.data;
+            const off = map.data.byteOffset ?? map.offset ?? 0;
+            const data = isFloat
+                ? new Float32Array(raw, off, (map.size / 4) | 0)
+                : new Int16Array(raw, off, (map.size / 2) | 0);
+
+            const left = this._features.pcmLeft;
+            const right = this._features.pcmRight;
+            if (!(left instanceof Float32Array) || left.length !== PCM_SAMPLES) return;
+
+            const scale = isFloat ? 1 : 1 / 32768.0;
+            for (let i = 0; i < PCM_SAMPLES; i++) {
+                const src = ((i * count) / PCM_SAMPLES) | 0;
+                if (src < count) {
+                    const idx = src * ch;
+                    const lv = data[idx] * scale;
+                    const rv = (ch >= 2 ? data[idx + 1] : data[idx]) * scale;
+                    left[i] = Number.isFinite(lv) ? lv : 0;
+                    right[i] = Number.isFinite(rv) ? rv : 0;
+                }
+            }
+
+            // Mark signal received
+            this._lastUpdateUsec = GLib.get_monotonic_time();
+            this._features.active = true;
+        } finally {
+            buffer.unmap(map);
+        }
+    }
+
+    // ── Reprobe logic ───────────────────────────────────────────
+
+    _clearReprobe() {
+        this._reprobeTimeoutId = clearGSource(this._reprobeTimeoutId);
     }
 
     _scheduleSourceReprobe() {
-        if (!this._enabled || !this._shouldAutoReprobe() || this._sourceReprobeTimeoutId)
+        this._scheduleReprobe();
+    }
+
+    _scheduleReprobe() {
+        if (!this._enabled || !this._isAutoMode() || this._reprobeTimeoutId)
             return;
 
-        const reprobeDelay = this._getIntSetting(
-            'audio-reprobe-delay-ms',
-            DEFAULT_SOURCE_REPROBE_DELAY_MSEC,
-            MIN_SOURCE_REPROBE_DELAY_MSEC,
-            120000
-        );
+        const base = this._getSetting('int', 'audio-reprobe-delay-ms', DEFAULT_SOURCE_REPROBE_DELAY_MSEC, MIN_SOURCE_REPROBE_DELAY_MSEC, 120000);
+        // Bit-shift for 2^n, capped to avoid overflow
+        const delay = Math.min(MAX_REPROBE_DELAY_MSEC, base * (1 << Math.min(this._totalReprobeFailures, 15)));
+        if (this._log.info)
+            this._log.info(
+                `milkdrop audio reprobe in ${delay}ms (failures=${this._totalReprobeFailures} activeSource=${this._activeSource})`
+            );
 
-        this._sourceReprobeTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, reprobeDelay, () => {
-            this._sourceReprobeTimeoutId = 0;
-
-            if (!this._enabled)
+        this._reprobeTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
+            this._reprobeTimeoutId = 0;
+            if (!this._enabled || this._activeSource !== 'stub')
                 return GLib.SOURCE_REMOVE;
-
-            if (this._activeSourceName !== 'stub')
+            if (this._pipeline && this._hasRecentSignal())
                 return GLib.SOURCE_REMOVE;
-
-            this._logger.info?.('milkdrop audio reprobe: retrying output monitor source selection');
-            this._startPipeline();
+            if (this._log.info)
+                this._log.info('milkdrop audio reprobe: retrying source selection');
+            this._startPipeline('source-reprobe');
             return GLib.SOURCE_REMOVE;
         });
     }
 
-    _shouldAutoReprobe() {
-        const configuredSource = this._getStringSetting('audio-source', 'auto');
-        return (configuredSource?.trim?.() || 'auto') === 'auto';
+    _isAutoMode() {
+        return (this._getSetting('string', 'audio-source', 'auto')?.trim?.() || 'auto') === 'auto';
     }
 
-    handleSettingsChanged(reason = 'settings-changed') {
-        if (!this._enabled)
+    // ── Utilities ───────────────────────────────────────────────
+
+    _hasRecentSignal() {
+        return this._lastUpdateUsec > 0 && GLib.get_monotonic_time() - this._lastUpdateUsec < SIGNAL_TIMEOUT_USEC;
+    }
+
+    _defaultFeatures(source) {
+        return {
+            source,
+            active: false,
+            pcmLeft: new Float32Array(PCM_SAMPLES),
+            pcmRight: new Float32Array(PCM_SAMPLES),
+        };
+    }
+
+    _notify(key, title, body) {
+        if (!this._onFallback || this._notifiedKeys.has(key))
             return;
-
-        this._logger.info?.(`milkdrop audio applying settings change: ${reason}`);
-        this._restartAttempts = 0;
-        this._restartWindowStartUsec = 0;
-        this._stopPipeline();
-        this._startPipeline();
+        this._notifiedKeys.add(key);
+        this._onFallback(title, body);
     }
 
-    _getIntSetting(key, fallback, min = null, max = null) {
-        if (!this._hasSettingKey(key))
+    // Unified settings accessor — collapses three typed getters into one.
+    _getSetting(type, key, fallback, min = null, max = null) {
+        if (!this._hasSetting(key))
             return fallback;
-
         try {
-            let value = this._settings.get_int(key);
-            if (min !== null)
-                value = Math.max(min, value);
-            if (max !== null)
-                value = Math.min(max, value);
-            return value;
-        } catch (_error) {
+            let v;
+            if (type === 'int') v = this._settings.get_int(key);
+            else if (type === 'double') v = this._settings.get_double(key);
+            else if (type === 'string') v = this._settings.get_string(key);
+            else return fallback;
+            if (min !== null && v < min) v = min;
+            if (max !== null && v > max) v = max;
+            return v;
+        } catch (_) {
             return fallback;
         }
     }
 
-    _getDoubleSetting(key, fallback) {
-        if (!this._hasSettingKey(key))
-            return fallback;
-
-        try {
-            return this._settings.get_double(key);
-        } catch (_error) {
-            return fallback;
-        }
-    }
-
-    _getStringSetting(key, fallback) {
-        if (!this._hasSettingKey(key))
-            return fallback;
-
-        try {
-            return this._settings.get_string(key);
-        } catch (_error) {
-            return fallback;
-        }
-    }
-
-    _hasSettingKey(key) {
+    _hasSetting(key) {
         try {
             const schema = this._settings?.settings_schema ?? this._settings?.get_settings_schema?.();
-            if (schema?.has_key)
-                return Boolean(schema.has_key(key));
-            return Boolean(this._settings);
-        } catch (_error) {
+            return schema?.has_key ? Boolean(schema.has_key(key)) : Boolean(this._settings);
+        } catch (_) {
             return false;
         }
-    }
-
-    _notifyFallbackOnce(key, title, body) {
-        if (!this._onFallback)
-            return;
-
-        if (this._fallbackNoticeKey === key)
-            return;
-
-        this._fallbackNoticeKey = key;
-        this._onFallback(title, body);
     }
 }

@@ -52,6 +52,67 @@ export function run(assert) {
         assert(callbackCount === 0, 'ipc-client does not dispatch callbacks for invalid JSON');
     }
 
+    // _readLoop resets the heartbeat timer on each successfully received line.
+    // Without this, a stalled IPC connection (no data from extension) goes undetected forever.
+    {
+        let heartbeatResets = 0;
+        const client = new IpcClient({socketPath: '/tmp/milkdrop-test.sock'});
+        client._running = true;
+        client._cancellable = {};
+        client._resetHeartbeat = () => { heartbeatResets += 1; };
+
+        let capturedCallback = null;
+        const mockInput = {
+            read_line_async(_priority, _cancellable, callback) { capturedCallback = callback; },
+            read_line_finish_utf8(_result) { return ['{"type":"telemetry"}', 17]; },
+        };
+        client._input = mockInput;
+        client._readLoop();
+        capturedCallback(mockInput, {});
+
+        assert(heartbeatResets >= 1, 'ipc-client _readLoop resets heartbeat timer on each received line');
+    }
+
+    // _readLoop does not register a duplicate loop when a stale callback fires after _input is replaced.
+    {
+        const readCallTargets = [];
+        let oldCallback = null;
+
+        const inputA = {
+            read_line_async(_priority, _cancellable, callback) {
+                readCallTargets.push('A');
+                oldCallback = callback;
+            },
+            read_line_finish_utf8(_result) {
+                return ['{"type":"telemetry"}', 17];
+            },
+        };
+        const inputB = {
+            read_line_async(_priority, _cancellable, _callback) {
+                readCallTargets.push('B');
+            },
+        };
+
+        const client = new IpcClient({socketPath: '/tmp/milkdrop-test.sock'});
+        client._running = true;
+        client._cancellable = {};
+
+        // Step 1: start loop on inputA
+        client._input = inputA;
+        client._readLoop();
+        assert(readCallTargets.join('') === 'A', 'ipc-client _readLoop registers read on initial input');
+
+        // Step 2: simulate reconnect — replace _input with inputB and start new loop
+        client._input = inputB;
+        client._readLoop();
+        assert(readCallTargets.join('') === 'AB', 'ipc-client _readLoop registers read on new input after reconnect');
+
+        // Step 3: stale callback from inputA fires — must NOT register another read on inputB
+        oldCallback(inputA, {});
+        assert(readCallTargets.join('') === 'AB',
+            'ipc-client stale _readLoop callback does not register duplicate read after _input is replaced');
+    }
+
     // stop() is idempotent and closes connection asynchronously once.
     {
         let closeAsyncCalls = 0;

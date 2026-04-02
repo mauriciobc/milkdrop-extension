@@ -31,24 +31,37 @@ extension_sources = files(
   'src/extension/audio.js',
   'src/extension/evaluator.js',
   'src/extension/extension.js',
+  'src/extension/frame-state.js',
   'src/extension/gnomeShellOverride.js',
   'src/extension/ipc.js',
   'src/extension/monitor.js',
+  'src/extension/mpris-watcher.js',
   'src/extension/perf.js',
   'src/extension/prefs.js',
   'src/extension/presets.js',
+  'src/extension/preset-crash-quarantine.js',
+  'src/extension/preset-probe-policy.js',
   'src/extension/windowTitle.js',
   'src/extension/wallpaper.js'
+)
+
+expr_sources = files(
+  'src/extension/expr/compiler.js',
+  'src/extension/expr/context.js',
+  'src/extension/expr/custom-shapes.js',
+  'src/extension/expr/custom-waves.js',
+  'src/extension/expr/functions.js',
+  'src/extension/expr/lexer.js',
+  'src/extension/expr/parser.js',
+  'src/extension/expr/per-frame.js',
+  'src/extension/expr/per-pixel.js'
 )
 
 renderer_sources = files(
   'src/renderer/gl-bridge.js',
   'src/renderer/glarea.js',
   'src/renderer/ipc-client.js',
-  'src/renderer/mesh.js',
-  'src/renderer/renderer.js',
-  'src/renderer/shaders.js',
-  'src/renderer/vertex-eval.js'
+  'src/renderer/renderer.js'
 )
 
 if has_c_compiler
@@ -61,7 +74,12 @@ if has_c_compiler
   math_dep = c_compiler.find_library('m', required: false)
   sysprof_dep = dependency('sysprof-capture-4', required: false)
 
-  gl_helper_deps = [egl_dep, epoxy_dep, glib_dep, gio_unix_dep, json_glib_dep, math_dep]
+  projectm_dep = dependency('projectM-4', required: true)
+  has_cxx = add_languages('cpp', required: true, native: false)
+  cxx_compiler = meson.get_compiler('cpp')
+  stdcpp_dep = cxx_compiler.find_library('stdc++', required: true)
+
+  gl_helper_deps = [egl_dep, epoxy_dep, glib_dep, gio_unix_dep, json_glib_dep, math_dep, projectm_dep, stdcpp_dep]
   gl_helper_c_args = []
   if sysprof_dep.found()
     gl_helper_deps += sysprof_dep
@@ -85,6 +103,17 @@ else
 endif
 
 install_data(extension_sources, install_dir: extension_dir)
+install_data(
+  'src/shared/ipc-protocol.js',
+  install_dir: join_paths(extension_dir, 'shared'),
+)
+install_data(
+  'src/extension/preset-loader-process.js',
+  'src/extension/milk-parser.js',
+  install_dir: join_paths(extension_dir, 'extension'),
+)
+install_data(expr_sources, install_dir: join_paths(extension_dir, 'expr'))
+install_data(expr_sources, install_dir: join_paths(extension_dir, 'extension', 'expr'))
 install_data(renderer_sources, install_dir: join_paths(extension_dir, 'renderer'))
 install_data(
   'src/extension/schemas/@0@.gschema.xml'.format(schema_id),

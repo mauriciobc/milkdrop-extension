@@ -1,64 +1,92 @@
 # Architecture
 
-gnome-milkdrop is structured as two cooperating processes.
+`gnome-milkdrop` runs as two cooperating JavaScript processes plus one native helper:
 
-## Processes
+1. **GNOME Shell extension** (`src/extension/`)
+2. **GTK4 renderer process** (`src/renderer/renderer.js`)
+3. **Native GL helper** (`src/renderer/milkdrop-gl-helper`)
 
-### GNOME Shell extension process
+## Runtime Ownership
 
-The shell-side extension owns lifecycle, monitor orchestration, renderer launch, renderer restart policy, IPC server, audio capture, preset loading, and per-frame evaluation.
+### Shell extension process
+
+Owns lifecycle and shell safety-critical orchestration:
+
+- monitor/renderer spawn-restart policy (`monitor.js`)
+- audio capture and beat features (`audio.js`)
+- preset indexing/probing/quarantine (`presets.js`, `preset-crash-quarantine.js`)
+- per-frame evaluation (`evaluator.js`)
+- extension-to-renderer socket IPC (`ipc.js`)
+- D-Bus status endpoint `io.github.mauriciobc.Milkdrop` (`GetWindowStatus`)
 
 ### Renderer process
 
-The renderer is a standalone GJS GTK4 application. It owns GtkGLArea, OpenGL state, ping-pong framebuffers, shader compilation, mesh updates, and per-vertex evaluation.
+Owns rendering state and helper bridge:
 
-## Why The Split Exists
+- GtkGLArea render loop and frame scheduling (`glarea.js`)
+- socket client from extension (`ipc-client.js`)
+- bridge to native helper with backpressure handling (`gl-bridge.js`)
+- helper lifecycle watchdog + telemetry (`gl-bridge.js`)
 
-- The gnome-shell process must stay stable.
-- OpenGL work needs a real GTK-side GL context.
-- Renderer crashes should not take down the shell.
-- Version-sensitive shell integration can evolve independently from the rendering core.
+### Native helper process
 
-## Initial Module Layout
+Owns low-level GL execution:
 
-### Extension
+- shader/program setup
+- frame rendering
+- optional shared-memory frame transfer to renderer
 
-- extension.js: lifecycle entry point
-- monitor.js: monitor enumeration and renderer ownership
-- ipc.js: socket server and frame delivery
-- audio.js: GStreamer spectrum pipeline
-- evaluator.js: per-frame evaluation backends
-- presets.js: preset indexing and loading
-- prefs.js: Adwaita preferences UI
+## Data Flow
 
-### Renderer
+```mermaid
+flowchart LR
+  subgraph shellProc [Shell_process]
+    audioEng[AudioEngine]
+    evaluator[Evaluator]
+    extIpc[IpcServer]
+    audioEng --> evaluator --> extIpc
+  end
 
-- renderer.js: Gtk.Application entry point
-- glarea.js: GtkGLArea and render loop shell
-- ipc-client.js: async frame ingestion
-- shaders.js: shader source handling and fallback logic
-- mesh.js: warp mesh generation
-- vertex-eval.js: per-vertex evaluation boundary
+  subgraph rendererProc [Renderer_process]
+    ipcClient[IpcClient]
+    glBridge[GlBridge]
+    ipcClient --> glBridge
+  end
 
-## Initial IPC Contract
+  subgraph helperProc [Native_helper]
+    helper[Milkdrop_GL_Helper]
+  end
 
-The first transport is a Unix socket using newline-delimited JSON. The protocol is intentionally simple for the first implementation pass.
+  extIpc --> ipcClient
+  glBridge --> helper
+```
 
-### Extension to renderer
+## IPC Contracts (current)
 
-- frame-state updates carrying time, frame count, basic motion values, and later audio-derived values
-- preset-change notifications once preset loading is added
+### Extension <-> Renderer socket (newline-delimited JSON)
 
-### Renderer to extension
+- renderer announces readiness with `type=ready` (+ `protocolVersion`)
+- hot path: `type=frame`
+- control path: `preset-load`, `set-text-overlay-visible`
+- renderer telemetry path: `helper-ready`, `frame-stat`, `telemetry`, `shader_error`, `helper-crashed`
 
-- ready
-- fps
-- shader_error
-- shutdown_ack
+The socket queue is intentionally bounded to protect `gnome-shell` from blocking writes.
+
+### Renderer <-> Helper stdin/stdout JSON
+
+- renderer sends `init`, `resize`, `frame`, `shutdown`
+- helper sends telemetry and frame metadata
+- renderer applies queue limits and drops frame writes under sustained backpressure
 
 ## Compatibility Baseline
 
-- GNOME Shell 47, 48, and 49
-- Wayland first
-- X11 only as a secondary path
-- Graphics offload only when the runtime supports it
+- GNOME Shell 47/48/49
+- Wayland-first, with X11 fallback path
+- projectM parity validation via `tests/run-parity.js`
+
+## Validation Checklist (for architecture-touching changes)
+
+- `gjs -m tests/run.js`
+- `gjs -m tests/run-parity.js`
+- `gjs -m tests/bench/run.js -- --json` (when environment includes benchmark assets)
+- `busctl --user call io.github.mauriciobc.Milkdrop /io/github/mauriciobc/Milkdrop io.github.mauriciobc.Milkdrop GetWindowStatus`

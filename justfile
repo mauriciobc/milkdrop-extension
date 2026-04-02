@@ -46,8 +46,14 @@ bench:
     @echo "── Renderer benchmark ──"
     @echo "Run: gjs -m src/renderer/renderer.js --benchmark --standalone --width 1280 --height 720"
 
+visual-expr preset="0":
+    gjs -m tests/visual-expr.js --preset {{preset}}
+
 bench-json:
     gjs -m tests/bench/run.js -- --json
+
+golden-frames:
+    gjs -m tools/generate-golden-frames.js
 
 profile:
     sysprof-cli --session -- dbus-run-session gnome-shell --devkit --wayland

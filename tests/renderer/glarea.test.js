@@ -10,8 +10,6 @@ function createMethodState() {
         _helperTexture: null,
         _helperTextureSerial: 0,
         _invalidHelperFrameSerial: 0,
-        _warpParams: null,
-        _useShaderWarp: false,
         _frameState: null,
         _onBridgeMessage: null,
         _loggerWarnings: [],
@@ -20,7 +18,6 @@ function createMethodState() {
                 state._loggerWarnings.push(message);
             },
         },
-        _uploadPresetMeshCalls: 0,
         _glSubmitFramePayload: null,
         _queueDrawCalls: 0,
         _removedTickIds: [],
@@ -34,19 +31,12 @@ function createMethodState() {
         queue_draw() {
             this._queueDrawCalls += 1;
         },
-        _uploadPresetMesh() {
-            this._uploadPresetMeshCalls += 1;
-        },
-        _glBridgeUploadMeshCalls: 0,
         _glBridge: {
             submitFrame(payload) {
                 state._glSubmitFramePayload = payload;
             },
-            uploadMesh(_mesh) {
-                state._glBridgeUploadMeshCalls += 1;
-            },
+            changePreset(_path) {},
         },
-        _baseMesh: {columns: 4, rows: 3},
     };
     state._ensureFallbackTick = MilkdropGLArea.prototype._ensureFallbackTick;
     state._disableFallbackTick = MilkdropGLArea.prototype._disableFallbackTick;
@@ -64,10 +54,18 @@ export function run(assert) {
         assert(state._tickCallbackId === firstTickId, '_ensureFallbackTick does not create duplicate ticks');
 
         MilkdropGLArea.prototype._handleBridgeMessage.call(state, {type: 'helper-ready', ok: true});
-        assert(state._tickCallbackId === 0, 'helper-ready disables fallback tick callback');
-        assert(state._removedTickIds.length === 1 && state._removedTickIds[0] === firstTickId,
-            'helper-ready removes the active tick callback id');
-        assert(state._uploadPresetMeshCalls === 1, 'helper-ready uploads preset mesh when helper becomes ready');
+        assert(state._tickCallbackId !== 0, 'helper-ready keeps fallback tick alive until first frame arrives');
+        assert(state._removedTickIds.length === 0, 'helper-ready does not remove tick when no frame yet');
+
+        // First frame-pixels with helper ready disables the tick.
+        const tickBeforeFrame = state._tickCallbackId;
+        MilkdropGLArea.prototype._handleBridgeMessage.call(state, {
+            type: 'frame-pixels', serial: 1, width: 1, height: 1, stride: 4,
+            bytes: {get_size() { return 4; }},
+        });
+        assert(state._tickCallbackId === 0, 'frame-pixels disables fallback tick when helper is ready');
+        assert(state._removedTickIds.length === 1 && state._removedTickIds[0] === tickBeforeFrame,
+            'frame-pixels removes the active tick callback id when helper is ready');
     }
 
     // helper-crashed and shader_error re-enable fallback tick and clear helper frame state.
@@ -100,22 +98,14 @@ export function run(assert) {
     // setFrameState submits frame payload and only queue_draws while helper is not ready.
     {
         const state = createMethodState();
-        const inputFrame = {frame: 7, zoom: 1.1, rot: 0.1};
+        const inputFrame = {frame: 7, t: 1.0};
         MilkdropGLArea.prototype.setFrameState.call(state, inputFrame);
-        assert(state._glSubmitFramePayload?.frame === 7, 'setFrameState forwards frame payload to bridge');
+        assert(state._glSubmitFramePayload === inputFrame, 'setFrameState forwards frame payload to bridge');
         assert(state._queueDrawCalls === 1, 'setFrameState queue_draws while helper is not ready');
 
         state._helperReady = true;
-        MilkdropGLArea.prototype.setFrameState.call(state, {frame: 8});
+        MilkdropGLArea.prototype.setFrameState.call(state, {frame: 8, t: 2.0});
         assert(state._queueDrawCalls === 1, 'setFrameState does not queue_draw when helper is ready');
-
-        state._useShaderWarp = true;
-        state._warpParams = {warpAmount: 0.5, warpSpeed: 0.25, warpScale: 1.2, warpType: 1};
-        MilkdropGLArea.prototype.setFrameState.call(state, {frame: 9});
-        assert(state._glSubmitFramePayload?.warpInShader === true,
-            'setFrameState adds warpInShader flag when shader warp is active');
-        assert(state._glSubmitFramePayload?.warpAmount === 0.5,
-            'setFrameState merges shader warp parameters in bridge payload');
     }
 
     // _getHelperTexture drops invalid helper frame payloads before creating MemoryTexture.
@@ -139,16 +129,50 @@ export function run(assert) {
         assert(state._loggerWarnings.length === 1, '_getHelperTexture logs warning for invalid frame payload');
     }
 
-    // helper-ready with shader warp active uploads identity mesh via bridge instead of vertex-warped mesh.
+    // _getHelperTexture nulls stale _helperTexture before allocating a new one (GC pressure fix).
     {
         const state = createMethodState();
-        state._useShaderWarp = true;
-        state._warpParams = {warpAmount: 0.5, warpSpeed: 1.0, warpScale: 1.0, warpType: 1};
+        const assignments = [];
+        let helperTextureValue = {stale: true};
 
-        MilkdropGLArea.prototype._handleBridgeMessage.call(state, {type: 'helper-ready', ok: true});
-        assert(state._uploadPresetMeshCalls === 0,
-            'helper-ready with shader warp does not call _uploadPresetMesh');
-        assert(state._glBridgeUploadMeshCalls === 1,
-            'helper-ready with shader warp uploads identity mesh via bridge');
+        Object.defineProperty(state, '_helperTexture', {
+            get() { return helperTextureValue; },
+            set(v) {
+                assignments.push(v === null ? 'null' : 'value');
+                helperTextureValue = v;
+            },
+            configurable: true,
+        });
+
+        state._helperTextureSerial = 5;
+        state._helperFrame = {
+            serial: 6,
+            width: 2,
+            height: 2,
+            stride: 8,
+            bytes: {get_size: () => 16},
+        };
+
+        try {
+            MilkdropGLArea.prototype._getHelperTexture.call(state);
+        } catch (_e) {
+            // creation failure is fine; the null step must still have happened first
+        }
+
+        assert(assignments.length >= 1 && assignments[0] === 'null',
+            '_getHelperTexture nulls stale _helperTexture before allocating new GdkMemoryTexture');
+    }
+
+    // changePreset delegates to bridge.
+    {
+        const state = createMethodState();
+        const paths = [];
+        state._glBridge = {
+            submitFrame() {},
+            changePreset(p) { paths.push(p); },
+        };
+        MilkdropGLArea.prototype.changePreset.call(state, '/test/preset.milk');
+        assert(paths.length === 1 && paths[0] === '/test/preset.milk',
+            'changePreset delegates to bridge changePreset');
     }
 }

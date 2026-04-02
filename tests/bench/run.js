@@ -7,6 +7,7 @@
  * reports min/median/p95/max in microseconds.
  */
 import GLib from 'gi://GLib';
+import Gio from 'gi://Gio';
 
 const ARGV = imports.system?.programArgs ?? ARGV ?? [];
 
@@ -78,19 +79,34 @@ async function main() {
     }
 
     const runBench = async (name, modulePath) => {
+        const runFile = Gio.File.new_for_uri(import.meta.url);
+        const runDirPath = runFile.get_parent()?.get_path() ?? GLib.get_current_dir();
+        const modulePathOnDisk = GLib.path_is_absolute(modulePath)
+            ? modulePath
+            : GLib.build_filenamev([runDirPath, modulePath]);
+        const moduleFile = Gio.File.new_for_path(modulePathOnDisk);
+        if (!moduleFile.query_exists(null)) {
+            print(`SKIP: ${name}: benchmark module not found (${modulePath})`);
+            return;
+        }
+        const moduleSpecifier = moduleFile.get_uri();
+
         try {
-            const mod = await import(modulePath);
+            const mod = await import(moduleSpecifier);
             if (typeof mod.run === 'function') {
                 const maybePromise = mod.run(bench);
                 if (maybePromise && typeof maybePromise.then === 'function')
                     await maybePromise;
+            } else if (typeof mod.main === 'function') {
+                await mod.main();
             } else {
-                print(`SKIP: ${name}: module has no run(bench) export`);
+                print(`SKIP: ${name}: module has no run(bench) or main() export`);
             }
         } catch (e) {
             print(`ERROR: ${name}: ${e.message}`);
             if (e.stack)
                 printerr(e.stack);
+            throw e;
         }
     };
 
@@ -98,6 +114,8 @@ async function main() {
     await runBench('audio', './audio.bench.js');
     await runBench('ipc-serialization', './ipc.bench.js');
     await runBench('presets', './presets.bench.js');
+    await runBench('parser-parity', './parser-benchmark.js');
+    await runBench('preset-loading', './preset-benchmark.js');
 
     if (jsonOutput) {
         print(JSON.stringify({benchmarks: results, timestamp: new Date().toISOString()}, null, 2));
@@ -107,9 +125,19 @@ async function main() {
     }
 }
 
-main().catch(e => {
-    printerr(e.message);
-    if (e.stack)
-        printerr(e.stack);
-    imports.system.exit(1);
-});
+// GJS exits before async main() + dynamic import() complete unless a main loop runs.
+const loop = GLib.MainLoop.new(null, false);
+
+main()
+    .then(() => {
+        loop.quit();
+    })
+    .catch(e => {
+        printerr(e.message);
+        if (e.stack)
+            printerr(e.stack);
+        loop.quit();
+        imports.system.exit(1);
+    });
+
+loop.run();

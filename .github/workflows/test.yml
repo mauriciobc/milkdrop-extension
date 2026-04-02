@@ -21,3 +21,9 @@ jobs:
         run: |
           meson setup build
           meson test -C build unit-tests
+
+      - name: Run benchmarks
+        run: gjs -m tests/bench/run.js
+
+      - name: Run parity tests
+        run: gjs -m tests/run-parity.js

@@ -1,0 +1,529 @@
+{
+  "version": 1,
+  "presetId": "000-empty",
+  "sourceFile": "000-empty.milk",
+  "description": "projectM test preset",
+  "seed": 12345,
+  "frames": [
+    {
+      "frame": 0,
+      "time": 0,
+      "inputs": {
+        "time": 0,
+        "frame": 0,
+        "fps": 30,
+        "progress": 0,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 1,
+      "time": 0.03333333333333333,
+      "inputs": {
+        "time": 0.03333333333333333,
+        "frame": 1,
+        "fps": 30,
+        "progress": 0.05263157894736842,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 2,
+      "time": 0.06666666666666667,
+      "inputs": {
+        "time": 0.06666666666666667,
+        "frame": 2,
+        "fps": 30,
+        "progress": 0.10526315789473684,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 3,
+      "time": 0.1,
+      "inputs": {
+        "time": 0.1,
+        "frame": 3,
+        "fps": 30,
+        "progress": 0.15789473684210525,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 4,
+      "time": 0.13333333333333333,
+      "inputs": {
+        "time": 0.13333333333333333,
+        "frame": 4,
+        "fps": 30,
+        "progress": 0.21052631578947367,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 5,
+      "time": 0.16666666666666666,
+      "inputs": {
+        "time": 0.16666666666666666,
+        "frame": 5,
+        "fps": 30,
+        "progress": 0.2631578947368421,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 6,
+      "time": 0.2,
+      "inputs": {
+        "time": 0.2,
+        "frame": 6,
+        "fps": 30,
+        "progress": 0.3157894736842105,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 7,
+      "time": 0.23333333333333334,
+      "inputs": {
+        "time": 0.23333333333333334,
+        "frame": 7,
+        "fps": 30,
+        "progress": 0.3684210526315789,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 8,
+      "time": 0.26666666666666666,
+      "inputs": {
+        "time": 0.26666666666666666,
+        "frame": 8,
+        "fps": 30,
+        "progress": 0.42105263157894735,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 9,
+      "time": 0.3,
+      "inputs": {
+        "time": 0.3,
+        "frame": 9,
+        "fps": 30,
+        "progress": 0.47368421052631576,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 10,
+      "time": 0.3333333333333333,
+      "inputs": {
+        "time": 0.3333333333333333,
+        "frame": 10,
+        "fps": 30,
+        "progress": 0.5263157894736842,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 11,
+      "time": 0.36666666666666664,
+      "inputs": {
+        "time": 0.36666666666666664,
+        "frame": 11,
+        "fps": 30,
+        "progress": 0.5789473684210527,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 12,
+      "time": 0.4,
+      "inputs": {
+        "time": 0.4,
+        "frame": 12,
+        "fps": 30,
+        "progress": 0.631578947368421,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 13,
+      "time": 0.43333333333333335,
+      "inputs": {
+        "time": 0.43333333333333335,
+        "frame": 13,
+        "fps": 30,
+        "progress": 0.6842105263157895,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 14,
+      "time": 0.4666666666666667,
+      "inputs": {
+        "time": 0.4666666666666667,
+        "frame": 14,
+        "fps": 30,
+        "progress": 0.7368421052631579,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 15,
+      "time": 0.5,
+      "inputs": {
+        "time": 0.5,
+        "frame": 15,
+        "fps": 30,
+        "progress": 0.7894736842105263,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 16,
+      "time": 0.5333333333333333,
+      "inputs": {
+        "time": 0.5333333333333333,
+        "frame": 16,
+        "fps": 30,
+        "progress": 0.8421052631578947,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 17,
+      "time": 0.5666666666666667,
+      "inputs": {
+        "time": 0.5666666666666667,
+        "frame": 17,
+        "fps": 30,
+        "progress": 0.8947368421052632,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 18,
+      "time": 0.6,
+      "inputs": {
+        "time": 0.6,
+        "frame": 18,
+        "fps": 30,
+        "progress": 0.9473684210526315,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    },
+    {
+      "frame": 19,
+      "time": 0.6333333333333333,
+      "inputs": {
+        "time": 0.6333333333333333,
+        "frame": 19,
+        "fps": 30,
+        "progress": 1,
+        "bass": 0,
+        "mid": 0,
+        "treb": 0,
+        "high": 0,
+        "bass_att": 0,
+        "mid_att": 0,
+        "treb_att": 0,
+        "energy": 0,
+        "beat": 0
+      },
+      "outputs": {
+        "zoom": 1,
+        "rot": 0,
+        "dx": 0,
+        "dy": 0,
+        "decay": 0.98
+      }
+    }
+  ]
+}

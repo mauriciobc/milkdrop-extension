@@ -4,7 +4,11 @@
  *
  * Each test module exports run(assert), where assert(condition, message)
  * records a failure when condition is false and continues execution.
+ *
+ * GJS exits when the main script returns unless a GLib main loop is running;
+ * async main() + dynamic import() otherwise never completes (no summary line).
  */
+import GLib from 'gi://GLib';
 
 let failed = 0;
 let passed = 0;
@@ -42,21 +46,42 @@ async function main() {
     await runTest('extension/evaluator', './extension/evaluator.test.js');
     await runTest('extension/presets', './extension/presets.test.js');
     await runTest('extension/settings-contract', './extension/settings-contract.test.js');
-    await runTest('extension/audio', './extension/audio.test.js');
+    await runTest('extension/frame-state-contract', './extension/frame-state-contract.test.js');
+    await runTest('extension/audio-pcm-contract', './extension/audio-pcm-contract.test.js');
+    await runTest('extension/preset-ipc-contract', './extension/preset-ipc-contract.test.js');
+    await runTest('extension/preset-crash-quarantine', './extension/preset-crash-quarantine.test.js');
+    await runTest('extension/preset-probe-policy', './extension/preset-probe-policy.test.js');
     await runTest('extension/window-title', './extension/window-title.test.js');
-    await runTest('renderer/vertex-eval', './renderer/vertex-eval.test.js');
-    await runTest('renderer/mesh', './renderer/mesh.test.js');
+    await runTest('extension/mpris-watcher', './extension/mpris-watcher.test.js');
     await runTest('renderer/gl-bridge', './renderer/gl-bridge.test.js');
     await runTest('renderer/glarea', './renderer/glarea.test.js');
     await runTest('renderer/ipc-client', './renderer/ipc-client.test.js');
+    await runTest('renderer/preset-load-contract', './renderer/preset-load-contract.test.js');
     await runTest('renderer/renderer', './renderer/renderer.test.js');
+    await runTest('extension/expr/lexer', './extension/expr/lexer.test.js');
+    await runTest('extension/expr/parser', './extension/expr/parser.test.js');
+    await runTest('extension/expr/compiler', './extension/expr/compiler.test.js');
+    await runTest('extension/expr/context', './extension/expr/context.test.js');
+    await runTest('extension/expr/per-frame', './extension/expr/per-frame.test.js');
+    await runTest('extension/expr/per-pixel', './extension/expr/per-pixel.test.js');
+    await runTest('extension/preset-custom-wave-contract', './extension/preset-custom-wave-contract.test.js');
+    await runTest('extension/preset-custom-shape-contract', './extension/preset-custom-shape-contract.test.js');
 
     console.log(`\n${passed} passed, ${failed} failed`);
     if (failed > 0)
         throw new Error(`${failed} test(s) failed`);
 }
 
-main().catch(e => {
-    console.error(e);
-    throw e;
-});
+const loop = GLib.MainLoop.new(null, false);
+
+main()
+    .then(() => {
+        loop.quit();
+    })
+    .catch(e => {
+        console.error(e);
+        loop.quit();
+        imports.system.exit(1);
+    });
+
+loop.run();

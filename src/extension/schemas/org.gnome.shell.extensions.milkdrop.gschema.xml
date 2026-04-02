@@ -8,7 +8,7 @@
       <description>List of monitor indices that should run a renderer. Empty means all monitors.</description>
     </key>
     <key name="preset-rotation-interval" type="i">
-      <default>15</default>
+      <default>0</default>
       <summary>Preset rotation interval</summary>
       <description>Seconds between automatic preset changes. Zero keeps manual rotation only.</description>
     </key>
@@ -20,17 +20,12 @@
     <key name="beat-cuts-enabled" type="b">
       <default>false</default>
       <summary>Beat cuts enabled</summary>
-      <description>Allow beat events to force preset changes once implemented.</description>
-    </key>
-    <key name="audio-sensitivity" type="d">
-      <default>1.0</default>
-      <summary>Audio sensitivity</summary>
-      <description>Multiplier applied to audio-derived values.</description>
+      <description>Allow beat events to force preset changes.</description>
     </key>
     <key name="show-on-empty-desktop-only" type="b">
       <default>false</default>
       <summary>Empty desktop only</summary>
-      <description>Restrict the renderer to empty-desktop situations once the visibility policy is implemented.</description>
+      <description>Pause the renderer unless the desktop is empty (no normal windows visible).</description>
     </key>
     <key name="text-overlay-enabled" type="b">
       <default>true</default>
@@ -46,6 +41,11 @@
       <default>false</default>
       <summary>Hide when maximized</summary>
       <description>Hide or pause the renderer when windows are maximized.</description>
+    </key>
+    <key name="show-only-when-media-playing" type="b">
+      <default>false</default>
+      <summary>Show only when media playing</summary>
+      <description>Run visualizations only when at least one MPRIS player has PlaybackStatus Playing. When no media is playing, the extension stays enabled but paused to save CPU and GPU.</description>
     </key>
     <key name="preset-directory" type="s">
       <default>''</default>
@@ -72,20 +72,10 @@
       <summary>Audio reprobe delay</summary>
       <description>Delay in milliseconds before retrying monitor-source selection when auto mode is in fallback.</description>
     </key>
-    <key name="eval-backend" type="s">
-      <default>'subprocess'</default>
-      <summary>Evaluator backend</summary>
-      <description>Evaluator backend mode for per-frame expression execution.</description>
-    </key>
     <key name="debug-renderer" type="b">
       <default>false</default>
       <summary>Debug renderer</summary>
       <description>Enable verbose renderer logging while developing.</description>
-    </key>
-    <key name="strict-render-path" type="b">
-      <default>false</default>
-      <summary>Strict render path</summary>
-      <description>Disable legacy Base64 frame fallback and require shared-memory frame transport.</description>
     </key>
     <key name="preset-rotation-mode" type="s">
       <default>'random'</default>

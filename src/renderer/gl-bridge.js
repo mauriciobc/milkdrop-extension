@@ -1,9 +1,40 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import GLibUnix from 'gi://GLibUnix';
 
 const encoder = new TextEncoder();
+const SHM_READ_RETRY_BASE_MS = 5;
+const SHM_READ_RETRY_MAX_MS = 100;
+const FORCED_GC_INTERVAL_US = 100_000;
+
+const forceGc = (() => {
+    if (typeof globalThis.gc === 'function')
+        return () => globalThis.gc();
+    if (typeof imports !== 'undefined' && typeof imports.system?.gc === 'function')
+        return () => imports.system.gc();
+    return null;
+})();
 
 const PERF_WINDOW_SIZE = 300;
+
+/**
+ * Copy up to `maxLen` finite numeric samples from `src` into a plain Array.
+ * Pre-allocates to avoid dynamic growth on the per-frame hot path.
+ * Values already confirmed as numbers (e.g. from JSON.parse) skip the cast.
+ */
+function _copyAudioSamples(src, maxLen) {
+    if (!src || src.length === 0)
+        return [];
+    const len = Math.min(src.length, maxLen);
+    const out = new Array(len);
+    let count = 0;
+    for (let i = 0; i < len; i++) {
+        const n = typeof src[i] === 'number' ? src[i] : Number(src[i]);
+        if (Number.isFinite(n))
+            out[count++] = n;
+    }
+    return count === len ? out : out.slice(0, count);
+}
 
 /**
  * Rolling frame-time statistics collector.
@@ -109,14 +140,43 @@ function buildShmSocketPath() {
     return `${runtimeDir}/gnome-milkdrop-shm-${nonce}.sock`;
 }
 
+function supportsAsyncShmFdReceive() {
+    return typeof Gio.UnixConnection?.prototype?.receive_fd_async === 'function';
+}
+
+function supportsShmFdReceive() {
+    const proto = Gio.UnixConnection?.prototype;
+    if (!proto) return false;
+    // Prefer async; fall back to sync via GLib FD source (receive_fd + get_socket).
+    return typeof proto.receive_fd_async === 'function' ||
+        (typeof proto.receive_fd === 'function' && typeof proto.get_socket === 'function');
+}
+
+function clearBridgeGSource(self, fieldName) {
+    const id = self[fieldName];
+    if (!id)
+        return;
+    GLib.source_remove(id);
+    self[fieldName] = 0;
+}
+
+function framePixelMetaDefaults(m) {
+    const width = m.width ?? 1;
+    return {
+        frame: m.frame ?? 0,
+        width,
+        height: m.height ?? 1,
+        stride: m.stride ?? Math.max(1, width * 4),
+        format: m.format ?? 'rgba8',
+    };
+}
+
 export class GlBridge {
-    constructor({strictRenderPath = false, logger = console, onMessage = null}) {
+    constructor({logger = console, onMessage = null}) {
         this._logger = logger;
         this._onMessage = onMessage;
         this._helperPath = buildHelperPath();
-        this._allowBase64Fallback = !strictRenderPath;
-        this._loggedBase64Fallback = false;
-        this._loggedBase64Rejected = false;
+        this._loggedUnexpectedBase64 = false;
         this._process = null;
         this._stdin = null;
         this._stdout = null;
@@ -128,27 +188,29 @@ export class GlBridge {
         this._startConfig = null;
         this._watchdogId = 0;
         this._lastFrameTime = 0;
+        this._lastFrameSentTime = 0;
         this._restartCount = 0;
         this._writeQueue = [];
         this._writePending = false;
-        this._shmFdQueue = [];
-        this._pendingFrameMetaQueue = [];
+        this._shmSlots = [];
         this._shmListener = null;
         this._shmSocketPath = null;
         this._shmAcceptPending = false;
         this._shmConnection = null;
         this._shmReceivePending = false;
+        this._shmReceiveSourceId = 0;
         this._shmReadPending = false;
+        this._shmDrainSourceId = 0;
+        this._shmReadFailureStreak = 0;
         this._droppedFrameWrites = 0;
         this._perfCollector = new PerfCollector();
+        this._lastForcedGcUs = 0;
     }
 
     static WATCHDOG_INTERVAL_MS = 5000;
-    static WATCHDOG_TIMEOUT_MS = 10000;
+    static WATCHDOG_TIMEOUT_MS = 25000;
     static MAX_RESTARTS = 3;
     static MAX_WRITE_QUEUE_LENGTH = 120;
-    static DEFAULT_ZOOM = 1.0;
-    static DEFAULT_DECAY = 0.98;
 
     get available() {
         return Gio.File.new_for_path(this._helperPath).query_exists(null);
@@ -173,6 +235,11 @@ export class GlBridge {
         this._writeQueue = [];
         this._writePending = false;
         this._droppedFrameWrites = 0;
+        this._perfCollector.reset();
+
+        this._logger.warn?.(
+            `milkdrop gl-bridge: helper path=${this._helperPath} exists=${this.available}`
+        );
 
         if (!this.available) {
             this._ready = false;
@@ -195,12 +262,10 @@ export class GlBridge {
         this._ready = false;
         this._lastFramePixels = null;
         this._lastFrameSerial = 0;
-        this._loggedBase64Fallback = false;
-        this._loggedBase64Rejected = false;
+        this._loggedUnexpectedBase64 = false;
         this._cancellable = new Gio.Cancellable();
 
-        this._shmFdQueue = [];
-        this._pendingFrameMetaQueue = [];
+        this._shmSlots = [];
         this._shmReadPending = false;
         this._setupShmListener();
 
@@ -241,6 +306,9 @@ export class GlBridge {
         });
 
         this._readOutput();
+        // Capture process at spawn time so a stale wait_async callback from a
+        // dead helper cannot fire after _tryRestart has already replaced it.
+        const capturedProcess = this._process;
         this._process.wait_async(this._cancellable, (process, result) => {
             try {
                 process.wait_finish(result);
@@ -250,6 +318,9 @@ export class GlBridge {
                 return;
             }
 
+            // Guard: if _process was replaced by a restart, this event is stale.
+            if (this._process !== capturedProcess)
+                return;
             if (!this._running)
                 return;
 
@@ -257,7 +328,6 @@ export class GlBridge {
             this._handleHelperExit('helper_exited', `native helper exited with code ${exitCode}`);
         });
         this.send({type: 'init', width, height});
-        this.send({type: 'compile-default'});
         this._startConfig = {width, height};
         this._lastFrameTime = GLib.get_monotonic_time();
         this._startWatchdog();
@@ -267,69 +337,53 @@ export class GlBridge {
             level: 'info',
             helperPath: this._helperPath,
         });
-        if (!this._allowBase64Fallback) {
-            this._emit({
-                type: 'telemetry',
-                stage: 'strict_render_path',
-                level: 'info',
-                msg: 'strict render path enabled; base64 frame fallback disabled',
-            });
-        }
         return true;
+    }
+
+    resize({width, height}) {
+        if (!this._running)
+            return;
+        if (width === this._startConfig?.width && height === this._startConfig?.height)
+            return;
+        this._startConfig = {width, height};
+        // Allow resizes before helper-ready: size_allocate can fire before the
+        // helper emits program_ready. The write queue preserves ordering.
+        this.send({type: 'resize', width, height});
+    }
+
+    _buildFrameHelperPayload(frameState) {
+        const audio = frameState.audio ?? {};
+        const pcmLeftSrc = Array.isArray(frameState.pcmLeft) ? frameState.pcmLeft
+            : (Array.isArray(audio.pcmLeft) ? audio.pcmLeft : null);
+        const pcmRightSrc = Array.isArray(frameState.pcmRight) ? frameState.pcmRight
+            : (Array.isArray(audio.pcmRight) ? audio.pcmRight : null);
+
+        const msg = {
+            type: 'frame',
+            time: frameState.t,
+            pcmLeft: _copyAudioSamples(pcmLeftSrc, 576),
+            pcmRight: _copyAudioSamples(pcmRightSrc, 576),
+        };
+
+        if (frameState.presetPath != null && frameState.presetPath !== '')
+            msg.presetPath = String(frameState.presetPath);
+
+        return msg;
     }
 
     submitFrame(frameState) {
         if (!this._running || !this._ready)
             return;
 
-        const audio = frameState.audio ?? {};
-        const msg = {
-            type: 'frame',
-            frame: frameState.frame,
-            time: frameState.t,
-            zoom: frameState.zoom ?? GlBridge.DEFAULT_ZOOM,
-            rot: frameState.rot ?? 0.0,
-            dx: frameState.dx ?? 0.0,
-            dy: frameState.dy ?? 0.0,
-            decay: frameState.decay ?? GlBridge.DEFAULT_DECAY,
-            energy: audio.energy ?? 0,
-            bass: audio.bass ?? 0,
-            mid: audio.mid ?? 0,
-            high: audio.high ?? 0,
-        };
-        if (frameState.warpInShader === true) {
-            msg.warpInShader = true;
-            msg.warpAmount = frameState.warpAmount ?? 0;
-            msg.warpSpeed = frameState.warpSpeed ?? 1;
-            msg.warpScale = frameState.warpScale ?? 1;
-            msg.warpType = frameState.warpType ?? 0;
-        }
-        this.send(msg);
+        this.send(this._buildFrameHelperPayload(frameState));
     }
 
-    uploadMesh(meshData) {
-        if (!this._running || !this._ready)
-            return;
-
-        const b64 = GLib.base64_encode(new Uint8Array(meshData.vertices.buffer));
-        this.send({
-            type: 'mesh',
-            vertexCount: meshData.vertexCount,
-            floatsPerVertex: meshData.floatsPerVertex,
-            data: b64,
-        });
-    }
-
-    compileShaders(shaders) {
+    changePreset(path) {
         if (!this._running)
             return;
-
-        this.send({
-            type: 'compile-shaders',
-            draw: shaders?.draw ?? null,
-            warp: shaders?.warp ?? null,
-            composite: shaders?.composite ?? null,
-        });
+        if (!path)
+            return;
+        this.send({type: 'preset-change', path: String(path)});
     }
 
     stop() {
@@ -344,6 +398,7 @@ export class GlBridge {
         this._running = false;
         this._ready = false;
         this._lastFramePixels = null;
+        this._lastFrameSentTime = 0;
         this._startConfig = null;
         this._cancellable?.cancel();
         try {
@@ -358,6 +413,17 @@ export class GlBridge {
 
     _setupShmListener() {
         this._teardownShmListener();
+
+        if (!supportsShmFdReceive()) {
+            this._emit({
+                type: 'telemetry',
+                stage: 'shm_unavailable',
+                level: 'warn',
+                msg: 'gio fd receive is unavailable; disabling shm transport',
+            });
+            return;
+        }
+
         this._shmSocketPath = buildShmSocketPath();
         try {
             try {
@@ -382,6 +448,7 @@ export class GlBridge {
 
     _teardownShmListener() {
         this._shmAcceptPending = false;
+        clearBridgeGSource(this, '_shmDrainSourceId');
         this._closeShmConnection();
         if (this._shmListener) {
             try {
@@ -398,13 +465,14 @@ export class GlBridge {
             this._shmSocketPath = null;
         }
         this._closeQueuedShmFds();
-        this._shmFdQueue = [];
-        this._pendingFrameMetaQueue = [];
+        this._shmSlots = [];
         this._shmReadPending = false;
+        this._shmReadFailureStreak = 0;
     }
 
     _closeShmConnection() {
         this._shmReceivePending = false;
+        clearBridgeGSource(this, '_shmReceiveSourceId');
         if (!this._shmConnection)
             return;
 
@@ -416,8 +484,68 @@ export class GlBridge {
         }
     }
 
+    // Thin wrapper around GLibUnix.fd_add_full so tests can mock it without touching
+    // the real GLib event loop.
+    _addFdSource(priority, fd, condition, callback) {
+        return GLibUnix.fd_add_full(priority, fd, condition, callback);
+    }
+
+    // Non-blocking FD receive loop for systems where receive_fd_async is unavailable.
+    // Uses a GLib FD source on the connection socket so receive_fd() is only called
+    // when data is actually readable — safe to call synchronously at that point.
+    _startShmReceiveLoopSync(connection, socketFd) {
+        if (!this._running || this._shmConnection !== connection)
+            return;
+
+        this._shmReceiveSourceId = this._addFdSource(
+            GLib.PRIORITY_DEFAULT, socketFd, GLib.IOCondition.IN, () => {
+                if (this._shmConnection !== connection) {
+                    this._shmReceiveSourceId = 0;
+                    return GLib.SOURCE_REMOVE;
+                }
+                try {
+                    const fd = connection.receive_fd(null);
+                    if (typeof fd === 'number' && fd >= 0) {
+                        this._enqueueShmFd(fd);
+                        this._drainShmFrameQueue();
+                    } else {
+                        this._emit({
+                            type: 'telemetry',
+                            stage: 'shm_receive_fd',
+                            level: 'warn',
+                            msg: 'sync receive_fd returned invalid file descriptor',
+                        });
+                    }
+                } catch (error) {
+                    if (error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                        return GLib.SOURCE_REMOVE;
+                    this._emit({
+                        type: 'telemetry',
+                        stage: 'shm_receive_fd',
+                        level: 'warn',
+                        msg: error.message,
+                    });
+                    this._shmReceiveSourceId = 0;
+                    this._closeShmConnection();
+                    this._armShmAcceptLoop();
+                    return GLib.SOURCE_REMOVE;
+                }
+                return GLib.SOURCE_CONTINUE;
+            }
+        );
+    }
+
+    _enqueueShmFd(fd) {
+        const slot = this._shmSlots.find(s => s.fd === undefined);
+        if (slot)
+            slot.fd = fd;
+        else
+            this._shmSlots.push({ meta: undefined, fd });
+    }
+
     _closeQueuedShmFds() {
-        for (const fd of this._shmFdQueue) {
+        for (const slot of this._shmSlots) {
+            const fd = slot.fd;
             if (typeof fd !== 'number' || fd < 0)
                 continue;
             try {
@@ -431,6 +559,9 @@ export class GlBridge {
     send(message) {
         if (!this._running || !this._stdin)
             return false;
+
+        if (message.type === 'frame')
+            this._lastFrameSentTime = GLib.get_monotonic_time();
 
         if (this._writeQueue.length >= GlBridge.MAX_WRITE_QUEUE_LENGTH) {
             if (message.type === 'frame') {
@@ -474,7 +605,15 @@ export class GlBridge {
 
         this._writePending = true;
         const entry = this._writeQueue.shift();
-        const bytes = new GLib.Bytes(encoder.encode(entry.payload));
+        let bytes;
+        try {
+            bytes = new GLib.Bytes(encoder.encode(entry.payload));
+        } catch (e) {
+            this._writePending = false;
+            this._emit({type: 'telemetry', stage: 'helper_encode_failed', level: 'warn', msg: e.message});
+            this._flushWriteQueue();
+            return;
+        }
         const capturedStdin = this._stdin;
         capturedStdin.write_bytes_async(bytes, GLib.PRIORITY_DEFAULT, this._cancellable, (stream, result) => {
             if (this._stdin !== capturedStdin)
@@ -522,6 +661,14 @@ export class GlBridge {
                 }
 
                 if (typeof connection.receive_fd_async !== 'function') {
+                    // Try GLib source-based sync fallback (GJS < 1.86 doesn't bind receive_fd_async).
+                    const socket = typeof connection.get_socket === 'function' ? connection.get_socket() : null;
+                    const socketFd = typeof socket?.get_fd === 'function' ? socket.get_fd() : -1;
+                    if (typeof socketFd === 'number' && socketFd >= 0) {
+                        this._shmConnection = connection;
+                        this._startShmReceiveLoopSync(connection, socketFd);
+                        return;
+                    }
                     this._emit({
                         type: 'telemetry',
                         stage: 'shm_accept',
@@ -573,7 +720,7 @@ export class GlBridge {
             try {
                 const fd = conn.receive_fd_finish(res);
                 if (fd >= 0) {
-                    this._shmFdQueue.push(fd);
+                    this._enqueueShmFd(fd);
                     this._drainShmFrameQueue();
                 } else {
                     this._emit({
@@ -600,10 +747,18 @@ export class GlBridge {
     }
 
     _readOutput() {
-        if (!this._stdout)
+        // Capture stdout/cancellable at call time so stale async callbacks from a
+        // previous helper instance don't interfere after _tryRestart replaces them.
+        const stdout = this._stdout;
+        const cancellable = this._cancellable;
+        if (!stdout)
             return;
 
-        this._stdout.read_line_async(GLib.PRIORITY_DEFAULT, this._cancellable, (stream, result) => {
+        stdout.read_line_async(GLib.PRIORITY_DEFAULT, cancellable, (stream, result) => {
+            // Guard: if _stdout was replaced by a restart, this loop is stale — drop it.
+            if (this._stdout !== stdout)
+                return;
+
             try {
                 const [line, length] = stream.read_line_finish_utf8(result);
                 if (length === 0) {
@@ -639,60 +794,41 @@ export class GlBridge {
         }
 
         if (message.type === 'frame-pixels-fd') {
-            this._pendingFrameMetaQueue.push({
-                frame: message.frame ?? 0,
-                width: message.width ?? 1,
-                height: message.height ?? 1,
-                stride: message.stride ?? Math.max(1, (message.width ?? 1) * 4),
-                format: message.format ?? 'rgba8',
-            });
+            const meta = framePixelMetaDefaults(message);
+            const slot = this._shmSlots.find(s => s.meta === undefined);
+            if (slot)
+                slot.meta = meta;
+            else
+                this._shmSlots.push({ meta, fd: undefined });
             this._drainShmFrameQueue();
             return;
         }
 
         if (message.type === 'frame-pixels') {
-            if (!this._allowBase64Fallback) {
-                if (!this._loggedBase64Rejected) {
-                    this._loggedBase64Rejected = true;
-                    this._emit({
-                        type: 'telemetry',
-                        stage: 'base64_disabled',
-                        level: 'warn',
-                        msg: 'dropping base64 frame payload because strict render path is enabled',
-                    });
-                }
-                return;
-            }
-
-            if (!this._loggedBase64Fallback) {
-                this._loggedBase64Fallback = true;
+            if (!this._loggedUnexpectedBase64) {
+                this._loggedUnexpectedBase64 = true;
                 this._emit({
                     type: 'telemetry',
-                    stage: 'base64_fallback',
+                    stage: 'unexpected_base64_frame',
                     level: 'warn',
-                    msg: 'using deprecated base64 frame transport fallback',
+                    msg: 'dropping deprecated base64 frame payload (frame-pixels); strict renderer expects SHM/FD transport',
                 });
             }
-
-            const decoded = GLib.base64_decode(message.data ?? '');
-            const bytes = GLib.Bytes.new(decoded);
-            this._publishFramePixels({
-                frame: message.frame ?? 0,
-                width: message.width ?? 1,
-                height: message.height ?? 1,
-                stride: message.stride ?? Math.max(1, (message.width ?? 1) * 4),
-                format: message.format ?? 'rgba8',
-            }, bytes);
             return;
         }
 
         if (message.type === 'frame-stat') {
+            // Update watchdog heartbeat on every frame-stat so the watchdog doesn't
+            // fire when the helper is rendering but pixels can't be delivered (e.g.
+            // SHM transport temporarily unavailable).
+            this._lastFrameTime = GLib.get_monotonic_time();
             this._perfCollector.record(message);
             this._emit(message);
             return;
         }
 
         if (message.type === 'telemetry' && message.stage === 'program_ready' && message.ok) {
+            const wasReady = this._ready;
             this._ready = true;
             this._emit({
                 type: 'helper-ready',
@@ -700,6 +836,15 @@ export class GlBridge {
                 stage: message.stage,
                 msg: message.msg ?? 'native helper ready',
             });
+            // Restart the watchdog if _ready transitioned false→true (e.g. after
+            // an error recovery or helper restart).  The watchdog guard cancels
+            // itself when _ready becomes false, so it must be restarted here.
+            if (!wasReady)
+                this._startWatchdog();
+            // Emit the raw telemetry too so listeners can observe it, then return —
+            // the fall-through this._emit(message) below would double-emit otherwise.
+            this._emit(message);
+            return;
         }
 
         if (message.type === 'shader_error') {
@@ -720,31 +865,48 @@ export class GlBridge {
         if (this._shmReadPending)
             return;
 
-        const metadata = this._pendingFrameMetaQueue.shift();
-        const fd = this._shmFdQueue.shift();
-        if (!metadata || fd === undefined) {
-            if (metadata)
-                this._pendingFrameMetaQueue.unshift(metadata);
-            if (fd !== undefined)
-                this._shmFdQueue.unshift(fd);
+        const readyIndex = this._shmSlots.findIndex(s => s.meta != null && s.fd !== undefined);
+        if (readyIndex < 0)
             return;
-        }
+
+        const slot = this._shmSlots[readyIndex];
+        this._shmSlots.splice(readyIndex, 1);
+        const metadata = slot.meta;
+        const fd = slot.fd;
 
         const pixelCount = metadata.stride * metadata.height;
         this._shmReadPending = true;
         this._readFrameBytesAsync(fd, pixelCount, (error, bytes) => {
             this._shmReadPending = false;
             if (error) {
+                this._shmReadFailureStreak += 1;
                 this._emit({
                     type: 'telemetry',
                     stage: 'shm_read',
                     level: 'warn',
                     msg: String(error?.message ?? error),
                 });
+                const delayMs = Math.min(
+                    SHM_READ_RETRY_MAX_MS,
+                    SHM_READ_RETRY_BASE_MS * (2 ** (this._shmReadFailureStreak - 1))
+                );
+                this._scheduleShmQueueDrain(delayMs);
             } else if (bytes) {
+                this._shmReadFailureStreak = 0;
                 this._publishFramePixels(metadata, bytes);
+                this._drainShmFrameQueue();
             }
+        });
+    }
+
+    _scheduleShmQueueDrain(delayMs = 0) {
+        if (this._shmDrainSourceId)
+            return;
+        const delay = Math.max(0, Math.floor(delayMs));
+        this._shmDrainSourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
+            this._shmDrainSourceId = 0;
             this._drainShmFrameQueue();
+            return GLib.SOURCE_REMOVE;
         });
     }
 
@@ -756,7 +918,11 @@ export class GlBridge {
                 try {
                     const bytes = input.read_bytes_finish(result);
                     if (bytes.get_size() !== pixelCount) {
-                        callback(new Error(`incomplete frame bytes read expected=${pixelCount} got=${bytes.get_size()}`), null);
+                        const error = new Error(`incomplete frame bytes read expected=${pixelCount} got=${bytes.get_size()}`);
+                        error.code = 'INCOMPLETE_SHM_READ';
+                        error.expected = pixelCount;
+                        error.got = bytes.get_size();
+                        callback(error, null);
                         return;
                     }
                     callback(null, bytes);
@@ -781,12 +947,14 @@ export class GlBridge {
     _publishFramePixels(metadata, bytes) {
         this._lastFrameSerial += 1;
         this._lastFrameTime = GLib.get_monotonic_time();
+        // Explicitly drop the previous frame before creating the new one so the
+        // GLib.Bytes (230+ KB of pixel data) can be collected promptly.  Without this,
+        // SpiderMonkey may accumulate many live frames because it cannot see the C-heap
+        // cost of the opaque GLib.Bytes wrapper objects.
+        this._lastFramePixels = null;
+        const md = framePixelMetaDefaults(metadata);
         this._lastFramePixels = {
-            frame: metadata.frame ?? 0,
-            width: metadata.width ?? 1,
-            height: metadata.height ?? 1,
-            stride: metadata.stride ?? Math.max(1, (metadata.width ?? 1) * 4),
-            format: metadata.format ?? 'rgba8',
+            ...md,
             bytes,
             serial: this._lastFrameSerial,
         };
@@ -794,6 +962,20 @@ export class GlBridge {
             type: 'frame-pixels',
             ...this._lastFramePixels,
         });
+        this._maybeForceGc();
+    }
+
+    _maybeForceGc() {
+        if (!forceGc)
+            return;
+        const nowUs = GLib.get_monotonic_time();
+        if (nowUs - this._lastForcedGcUs < FORCED_GC_INTERVAL_US)
+            return;
+        this._lastForcedGcUs = nowUs;
+        try {
+            forceGc();
+        } catch (_error) {
+        }
     }
 
     _handleHelperExit(stage, msg) {
@@ -834,8 +1016,22 @@ export class GlBridge {
                 return GLib.SOURCE_REMOVE;
             }
 
+            // If no frame has been sent recently (rendering is paused or initial
+            // compile phase), reset the heartbeat so the watchdog doesn't fire
+            // on an intentionally idle helper.  _lastFrameSentTime === 0 means
+            // no frame has ever been sent (still compiling shaders).
+            const sinceLastSend = this._lastFrameSentTime > 0
+                ? (GLib.get_monotonic_time() - this._lastFrameSentTime) / 1000
+                : Infinity;
+            if (sinceLastSend > GlBridge.WATCHDOG_TIMEOUT_MS)
+                this._lastFrameTime = GLib.get_monotonic_time();
+
             const elapsed = (GLib.get_monotonic_time() - this._lastFrameTime) / 1000;
             if (elapsed > GlBridge.WATCHDOG_TIMEOUT_MS) {
+                const watchdogMsg = `milkdrop gl-bridge: watchdog triggered, helper unresponsive for ${Math.round(elapsed)}ms`;
+                // Log directly to console so the message reaches journalctl even when
+                // the IPC channel to the extension is stalled or the write buffer is full.
+                this._logger.warn?.(watchdogMsg);
                 this._emit({
                     type: 'telemetry',
                     stage: 'watchdog',
@@ -843,7 +1039,12 @@ export class GlBridge {
                     msg: `helper unresponsive for ${Math.round(elapsed)}ms, restarting`,
                 });
                 this._watchdogId = 0;
+                // Save config before stop() clears it, otherwise _tryRestart()
+                // will return immediately because !_startConfig.
+                const savedConfig = this._startConfig;
                 this.stop();
+                if (savedConfig)
+                    this._startConfig = savedConfig;
                 this._tryRestart();
                 return GLib.SOURCE_REMOVE;
             }
@@ -853,21 +1054,33 @@ export class GlBridge {
     }
 
     _stopWatchdog() {
-        if (this._watchdogId) {
-            GLib.source_remove(this._watchdogId);
-            this._watchdogId = 0;
-        }
+        clearBridgeGSource(this, '_watchdogId');
     }
 
     _tryRestart() {
-        if (!this._startConfig)
+        if (!this._startConfig) {
+            // No config means we can't restart; notify listeners so the glarea
+            // can fall back to the software animation instead of freezing.
+            this._emit({
+                type: 'helper-ready',
+                ok: false,
+                stage: 'restart_unavailable',
+                msg: 'helper restart unavailable (no start config)',
+            });
             return;
+        }
 
         if (this._restartCount >= GlBridge.MAX_RESTARTS) {
             this._emit({
                 type: 'telemetry',
                 stage: 'watchdog',
                 level: 'error',
+                msg: `helper restart limit reached (${GlBridge.MAX_RESTARTS})`,
+            });
+            this._emit({
+                type: 'helper-ready',
+                ok: false,
+                stage: 'restart_limit_reached',
                 msg: `helper restart limit reached (${GlBridge.MAX_RESTARTS})`,
             });
             return;

@@ -22,8 +22,8 @@ export const LiveWallpaper = GObject.registerClass(
         constructor(backgroundActor) {
             super({
                 layout_manager: new Clutter.BinLayout(),
-                width: backgroundActor.width,
-                height: backgroundActor.height,
+                width: Math.max(1, backgroundActor.width || 1),
+                height: Math.max(1, backgroundActor.height || 1),
                 x_expand: true,
                 y_expand: true,
                 opacity: 0,
@@ -32,6 +32,22 @@ export const LiveWallpaper = GObject.registerClass(
             this._monitorIndex = backgroundActor.monitor;
             this._wallpaper = null;
             this._pollSourceId = 0;
+            this._destroyed = false;
+            this.connect('destroy', () => {
+                this._destroyed = true;
+                if (this._pollSourceId) {
+                    GLib.source_remove(this._pollSourceId);
+                    this._pollSourceId = 0;
+                }
+                if (this._wallpaperIdleId) {
+                    GLib.source_remove(this._wallpaperIdleId);
+                    this._wallpaperIdleId = 0;
+                }
+
+                // Just clear references. Clutter handles children.
+                this._wallpaper = null;
+                this._wallpaperDestroyId = 0;
+            });
 
             // Stack ourselves on top of the static background content.
             backgroundActor.layout_manager = new Clutter.BinLayout();
@@ -42,27 +58,57 @@ export const LiveWallpaper = GObject.registerClass(
 
         _applyWallpaper() {
             const tryApply = () => {
-                // Already applied, nothing to do.
-                if (this._wallpaper) {
+                if (this._destroyed) {
                     this._pollSourceId = 0;
                     return GLib.SOURCE_REMOVE;
                 }
+                try {
+                    // Already applied, nothing to do.
+                    if (this._wallpaper) {
+                        this._pollSourceId = 0;
+                        return GLib.SOURCE_REMOVE;
+                    }
 
-                const renderer = this._getRenderer();
-                if (!renderer)
-                    return GLib.SOURCE_CONTINUE;
+                    const renderer = this._getRenderer();
+                    if (!renderer)
+                        return GLib.SOURCE_CONTINUE;
 
-                this._wallpaper = new Clutter.Clone({
-                    source: renderer,
-                    pivot_point: new Graphene.Point({x: 0.5, y: 0.5}),
-                });
-                this._wallpaper.connect('destroy', () => {
-                    this._wallpaper = null;
-                });
-                this.add_child(this._wallpaper);
-                this._fade(true);
-                this._pollSourceId = 0;
-                return GLib.SOURCE_REMOVE;
+                    this._wallpaper = new Clutter.Clone({
+                        source: renderer,
+                        pivot_point: new Graphene.Point({x: 0.5, y: 0.5}),
+                    });
+                    this._wallpaperDestroyId = this._wallpaper.connect('destroy', () => {
+                        const destroyedWallpaper = this._wallpaper;
+                        this._wallpaperIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+                            // Guard against the LiveWallpaper being finalized by C code
+                            // before this idle fires — any property access on `this` can
+                            // throw a "already disposed" error in that case.
+                            try {
+                                this._wallpaperIdleId = 0;
+                                if (this._destroyed)
+                                    return GLib.SOURCE_REMOVE;
+                                try {
+                                    if (destroyedWallpaper)
+                                        destroyedWallpaper.source = null;
+                                    if (this._wallpaper === destroyedWallpaper)
+                                        this._wallpaper = null;
+                                } catch (_e) {}
+                                if (!this._wallpaper)
+                                    this._applyWallpaper();
+                            } catch (_e) {
+                                // LiveWallpaper already finalized — nothing to do.
+                            }
+                            return GLib.SOURCE_REMOVE;
+                        });
+                    });
+                    this.add_child(this._wallpaper);
+                    this._fade(true);
+                    this._pollSourceId = 0;
+                    return GLib.SOURCE_REMOVE;
+                } catch (_e) {
+                    this._pollSourceId = 0;
+                    return GLib.SOURCE_REMOVE;
+                }
             };
 
             if (tryApply() === GLib.SOURCE_CONTINUE) {
@@ -91,14 +137,6 @@ export const LiveWallpaper = GObject.registerClass(
                 duration: BACKGROUND_FADE_ANIMATION_TIME,
                 mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             });
-        }
-
-        vfunc_destroy() {
-            if (this._pollSourceId) {
-                GLib.source_remove(this._pollSourceId);
-                this._pollSourceId = 0;
-            }
-            super.vfunc_destroy();
         }
     }
 );
