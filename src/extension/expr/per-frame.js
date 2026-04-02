@@ -17,8 +17,6 @@
 
 import { compile } from './compiler.js';
 import { FrameContext } from './context.js';
-import { CustomWave } from './custom-waves.js';
-import { CustomShape } from './custom-shapes.js';
 
 const NOOP = (_ctx) => {};
 
@@ -28,19 +26,6 @@ export class ExpressionEvaluator {
         this._initFn = NOOP;
         this._frameFn = NOOP;
         this._preset = null;
-        
-        this._customWaves = [
-            new CustomWave(0),
-            new CustomWave(1),
-            new CustomWave(2),
-            new CustomWave(3),
-        ];
-        this._customShapes = [
-            new CustomShape(0),
-            new CustomShape(1),
-            new CustomShape(2),
-            new CustomShape(3),
-        ];
     }
 
     /**
@@ -54,8 +39,6 @@ export class ExpressionEvaluator {
         if (!preset) {
             this._initFn = NOOP;
             this._frameFn = NOOP;
-            this._loadCustomWaves(null);
-            this._loadCustomShapes(null);
             return;
         }
 
@@ -64,9 +47,6 @@ export class ExpressionEvaluator {
 
         this._initFn = preset.init_eqs ? compile(preset.init_eqs) : NOOP;
         this._frameFn = preset.frame_eqs ? compile(preset.frame_eqs) : NOOP;
-
-        this._loadCustomWaves(preset.customWaves);
-        this._loadCustomShapes(preset.customShapes);
 
         this._ctx.rerollPresetRandom();
     }
@@ -81,30 +61,11 @@ export class ExpressionEvaluator {
         this._ctx.setRandForTesting(randStart, randPreset);
     }
 
-    _loadCustomWaves(customWaves) {
-        for (let i = 0; i < 4; i++) {
-            const waveDef = customWaves && customWaves[i] ? customWaves[i] : null;
-            this._customWaves[i].load(waveDef);
-        }
-    }
-
-    _loadCustomShapes(customShapes) {
-        for (let i = 0; i < 4; i++) {
-            const shapeDef = customShapes && customShapes[i] ? customShapes[i] : null;
-            this._customShapes[i].load(shapeDef);
-        }
-    }
-
     /**
      * Run init_eqs once (called after loadPreset, before first frame).
      */
     runInit() {
         this._initFn(this._ctx);
-        
-        for (let i = 0; i < 4; i++) {
-            this._customWaves[i].runInit(this._ctx);
-            this._customShapes[i].runInit(this._ctx);
-        }
     }
 
     /**
@@ -139,68 +100,7 @@ export class ExpressionEvaluator {
         // Run per-frame equations
         this._frameFn(this._ctx);
 
-        // Evaluate custom waves and shapes per-frame
-        for (let i = 0; i < 4; i++) {
-            this._customWaves[i].evaluateFrame(this._ctx);
-            this._customShapes[i].evaluateFrame(this._ctx);
-        }
-
         return this._ctx;
-    }
-
-    /**
-     * Get custom wave geometry for all enabled waves.
-     * @param {object} audioData - { pcmLeft, pcmRight, spectrumLeft, spectrumRight }
-     * @returns {Array|null} Array of point arrays or null if no waves enabled
-     */
-    evaluateCustomWaves(audioData) {
-        const results = [];
-        
-        const pcmLeft = audioData?.pcmLeft || [];
-        const pcmRight = audioData?.pcmRight || [];
-        const spectrumLeft = audioData?.spectrumLeft || [];
-        const spectrumRight = audioData?.spectrumRight || [];
-
-        for (let i = 0; i < 4; i++) {
-            const wave = this._customWaves[i];
-            const info = wave.getWaveInfo();
-            
-            if (!info.enabled) {
-                results.push(null);
-                continue;
-            }
-
-            const audio1 = info.spectrum ? spectrumLeft : pcmLeft;
-            const audio2 = info.spectrum ? spectrumRight : pcmRight;
-            
-            const points = wave.evaluatePoints(this._ctx, audio1, audio2);
-            results.push({
-                points,
-                useDots: info.useDots,
-                drawThick: info.drawThick,
-                additive: info.additive,
-            });
-        }
-
-        return results;
-    }
-
-    /**
-     * Get custom shape geometry for all enabled shapes.
-     * @returns {Array} Array of shape geometries
-     */
-    evaluateCustomShapes() {
-        const results = [];
-        
-        for (let i = 0; i < 4; i++) {
-            const shape = this._customShapes[i];
-            const geoms = shape.evaluateAllInstances(this._ctx);
-            if (geoms && geoms.length > 0) {
-                results.push(...geoms);
-            }
-        }
-
-        return results;
     }
 
     /**

@@ -161,7 +161,6 @@ app.connect('activate', () => {
 
     const glArea = new MilkdropGLArea({
         standalone: true,
-        strictRenderPath: false,
         logger: console,
         onBridgeMessage: (msg) => {
             if (msg.type === 'helper-ready' && msg.ok)

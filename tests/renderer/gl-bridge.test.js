@@ -512,4 +512,28 @@ export function run(assert) {
         assert(bridge._writeQueue.length === 2, 'send keeps queue bounded at configured limit');
         assert(warned, 'send emits backpressure warning telemetry when dropping frames');
     }
+
+    // PerfCollector resets on start() so stats don't bleed across helper restarts.
+    {
+        const {bridge} = createBridgeWithMessages();
+
+        // Record some frames to populate the collector.
+        bridge._perfCollector.record({render_us: 1000, readback_us: 200, frame_count: 10, time: 1.0});
+        bridge._perfCollector.record({render_us: 2000, readback_us: 400, frame_count: 11, time: 1.016});
+        const statsBefore = bridge._perfCollector.getStats();
+        assert(statsBefore !== null, 'PerfCollector has stats after recording frames');
+        assert(statsBefore.frames === 11, 'PerfCollector stats reflect last frame_count before restart');
+
+        // Simulate restart: start() should reset the collector before re-launch.
+        // Skip actual process spawn by patching the bridge to be "not available".
+        const origAvailable = Object.getOwnPropertyDescriptor(GlBridge.prototype, 'available');
+        Object.defineProperty(bridge, 'available', {get: () => false, configurable: true});
+        bridge.start({width: 800, height: 600});
+
+        const statsAfter = bridge._perfCollector.getStats();
+        assert(statsAfter === null, 'PerfCollector is cleared by start() so restarts begin with fresh stats');
+
+        if (origAvailable)
+            Object.defineProperty(bridge, 'available', origAvailable);
+    }
 }

@@ -172,11 +172,10 @@ function framePixelMetaDefaults(m) {
 }
 
 export class GlBridge {
-    constructor({strictRenderPath = false, logger = console, onMessage = null}) {
+    constructor({logger = console, onMessage = null}) {
         this._logger = logger;
         this._onMessage = onMessage;
         this._helperPath = buildHelperPath();
-        this._strictRenderPath = Boolean(strictRenderPath);
         this._loggedUnexpectedBase64 = false;
         this._process = null;
         this._stdin = null;
@@ -236,6 +235,7 @@ export class GlBridge {
         this._writeQueue = [];
         this._writePending = false;
         this._droppedFrameWrites = 0;
+        this._perfCollector.reset();
 
         this._logger.warn?.(
             `milkdrop gl-bridge: helper path=${this._helperPath} exists=${this.available}`
@@ -337,14 +337,6 @@ export class GlBridge {
             level: 'info',
             helperPath: this._helperPath,
         });
-        if (this._strictRenderPath) {
-            this._emit({
-                type: 'telemetry',
-                stage: 'strict_render_path',
-                level: 'info',
-                msg: 'strict render path enabled',
-            });
-        }
         return true;
     }
 

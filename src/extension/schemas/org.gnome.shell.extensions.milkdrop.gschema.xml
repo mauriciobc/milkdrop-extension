@@ -77,11 +77,6 @@
       <summary>Debug renderer</summary>
       <description>Enable verbose renderer logging while developing.</description>
     </key>
-    <key name="strict-render-path" type="b">
-      <default>false</default>
-      <summary>Strict render path</summary>
-      <description>Disable legacy Base64 frame fallback and require shared-memory frame transport.</description>
-    </key>
     <key name="preset-rotation-mode" type="s">
       <default>'random'</default>
       <summary>Preset rotation mode</summary>

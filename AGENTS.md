@@ -1,55 +1,89 @@
-✓ **Verification Complete**
+# AGENTS.md
 
-The finding in `src/extension/evaluator.js` around lines 152-158 has been verified and fixed:
+Workspace instructions for coding agents working on this repository.
 
-**Issue**: The code was passing `incomingAudio.spectrum || []` to both `spectrumLeft` and `spectrumRight`, but `incomingAudio.spectrum` doesn't exist (the audio engine only provides `pcmLeft` and `pcmRight`).
+## Scope
 
-**Fix Applied** (src/extension/evaluator.js:190-193):
-- Changed `spectrumLeft: incomingAudio.spectrum || []` to `spectrumLeft: incomingAudio.pcmLeft || []`
-- Changed `spectrumRight: incomingAudio.spectrum || []` to `spectrumRight: incomingAudio.pcmRight || []`
-- Added clarifying comment explaining that spectrum data is not provided by the audio engine
+- Project type: GNOME Shell extension in GJS with a GTK4 renderer subprocess and a native OpenGL helper.
+- Primary goal: keep shell-side code robust and non-blocking while preserving visual/audio parity behavior.
+- Canonical high-level docs:
+	- `README.md`
+	- `CLAUDE.md`
+	- `docs/architecture.md`
+	- `docs/development.md`
 
-**Verification**:
-- ✓ Syntax check passed
-- ✓ All 895 tests pass
-- ✓ No remaining references to `incomingAudio.spectrum`
+## Quick Start Commands
 
-**Result**: Spectrum-based custom waves will now use PCM data as a fallback, which is the expected behavior when spectrum data is unavailable.
+Run all commands from the repository root.
 
----
+- Build helper:
+	- `meson setup build`
+	- `meson compile -C build`
+- Unit/integration tests:
+	- `gjs -m tests/run.js`
+- Parity tests:
+	- `gjs -m tests/run-parity.js`
+- Benchmarks:
+	- `gjs -m tests/bench/run.js`
+	- `gjs -m tests/bench/run.js -- --json`
+- Local development via just:
+	- `just install`
+	- `just reinstall`
+	- `just nested`
+	- `just renderer`
+	- `just logs`
 
-✓ **Verification Complete**
+## Mandatory Constraints
 
-The finding in `src/extension/wallpaper.js` around lines 74-85 has been verified and fixed:
+- Runtime is GJS, not Node.js. Do not add npm/webpack/transpilation assumptions.
+- Do not use `eval()` or `new Function()` in expression code.
+- Shell process safety first: code under `src/extension/` runs in GNOME Shell PID.
+- Keep IPC non-blocking; respect bounded queues and backpressure behavior.
+- Treat GNOME 47, 48, and 49 compatibility as explicit when touching shell internals.
+- Prefer minimal, targeted changes; avoid unrelated refactors.
 
-**Issue**: The destroy handler for the wallpaper clone closed over `this._wallpaper`. If a new wallpaper was created before the `GLib.idle_add` callback from a destroyed wallpaper ran, the idle callback would erroneously null out the new wallpaper instance.
+## Architecture Boundaries
 
-**Fix Applied** (src/extension/wallpaper.js:75-84):
-- Captured the current wallpaper reference as `destroyedWallpaper` inside the connect callback.
-- Updated the idle callback to use `destroyedWallpaper` instead of `this._wallpaper`.
-- Added a check: only null `this._wallpaper` if it strictly matches `destroyedWallpaper`.
+- `src/extension/`: shell-side lifecycle, monitor orchestration, audio capture, evaluator, presets, IPC server.
+- `src/renderer/`: GTK4 renderer process, `GtkGLArea`, GL bridge/client.
+- `src/renderer/gl-helper.c`: native OpenGL helper and readback path.
+- `src/shared/`: protocol/shared constants.
 
-**Verification**:
-- ✓ All 899 tests pass.
-- ✓ Manual inspection confirms the race condition is resolved.
+Before changing cross-process behavior, review:
 
-**Result**: Wallpaper transitions and re-applications are now robust against race conditions between destruction and creation of clones.
----
+- `docs/architecture.md`
+- `src/shared/ipc-protocol.js`
+- `src/extension/ipc.js`
+- `src/renderer/ipc-client.js`
 
-✓ **Verification Complete**
+## Testing Expectations
 
-The finding in `src/extension/audio.js` around lines 657-661 has been verified and fixed:
+- Any change in `src/extension/expr/`, evaluator, parser, or preset loading should run:
+	- `gjs -m tests/run.js`
+	- `gjs -m tests/run-parity.js`
+- Any performance-sensitive or parsing-path change should also run:
+	- `gjs -m tests/bench/run.js`
+- Any change touching `src/renderer/gl-helper.c` should rebuild with Meson before tests.
 
-**Issue**: The code was treating `GstStructure.get_string('format')` and `get_int('channels')` as returning scalars. In GJS, `get_int` (which has an out parameter and boolean return in C) returns a `[success, value]` tuple. Treating this tuple as a scalar caused math operations (e.g. `bytesPerSample * channels`) to result in `NaN`, silently breaking PCM processing in `_processAppsinkSample`.
+## Known Pitfalls
 
-**Fix Applied** (src/extension/audio.js:657-663):
-- Updated the retrieval of `format` and `channels` to use a robust extraction pattern that handles both scalar and tuple return values.
-- Used destructuring to capture success flags (`okFormat`, `okChannels`) and values (`format`, `channels`).
-- Updated the guard to return early if either field is missing or the retrieval failed (`!okFormat || !okChannels`).
+- GJS introspection APIs may return tuples for getters (for example GStreamer structure integer getters).
+- Preset handling must remain crash-resilient; avoid weakening probe/quarantine safeguards.
+- GLib idle/timeout callbacks can race with teardown; guard against stale object references.
+- Bench and parity tooling assumes repository-root cwd.
 
-**Verification**:
-- ✓ Verified `get_int` returns tuple behavior with GJS test script.
-- ✓ All 899 tests pass.
-- ✓ PCM data processing is now robust against GJS binding variations for GstStructure getters.
+## Link-First Reference Index
 
-**Result**: Waveform/PCM data from appsink will now correctly parse format and channel count, ensuring accurate audio visualization.
+- Architecture and process model: `docs/architecture.md`
+- Development/debug workflows: `docs/development.md`
+- Expression semantics: `docs/milkdrop-expression-spec.md`
+- Parity progress and context: `docs/parity-validation-progress.md`, `docs/projectm-parity.md`
+- Known decisions and open questions: `QUESTIONS.md`
+- Refactor guardrails: `REFACTOR_CHECKLIST.md`
+
+## Agent Working Style
+
+- Prefer read-only exploration first, then smallest safe patch.
+- Preserve existing module boundaries and naming unless change requires otherwise.
+- Include concise rationale in commit/patch summaries: what changed, why, and which tests were run.
+- If unsure about process ownership (shell vs renderer vs helper), stop and verify before editing.

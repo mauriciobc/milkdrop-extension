@@ -64,8 +64,6 @@ async function main() {
     await runTest('extension/expr/context', './extension/expr/context.test.js');
     await runTest('extension/expr/per-frame', './extension/expr/per-frame.test.js');
     await runTest('extension/expr/per-pixel', './extension/expr/per-pixel.test.js');
-    await runTest('extension/expr/custom-shapes', './extension/expr/custom-shapes.test.js');
-    await runTest('extension/expr/custom-waves', './extension/expr/custom-waves.test.js');
     await runTest('extension/preset-custom-wave-contract', './extension/preset-custom-wave-contract.test.js');
     await runTest('extension/preset-custom-shape-contract', './extension/preset-custom-shape-contract.test.js');
 

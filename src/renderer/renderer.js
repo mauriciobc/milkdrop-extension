@@ -32,6 +32,31 @@ function _hasOptionValue(value) {
     return typeof value === 'string' && value.length > 0 && !value.startsWith('--');
 }
 
+function _canonicalPath(path) {
+    if (typeof path !== 'string' || path.length === 0)
+        return null;
+    const absolute = GLib.path_is_absolute(path)
+        ? path
+        : GLib.build_filenamev([GLib.get_current_dir(), path]);
+    return GLib.canonicalize_filename(absolute, null);
+}
+
+function _modulePathFromUrl(url) {
+    if (typeof url !== 'string' || !url.startsWith('file://'))
+        return null;
+    try {
+        return Gio.File.new_for_uri(url).get_path();
+    } catch (_error) {
+        return null;
+    }
+}
+
+function _isExecutedAsMain(importMetaUrl, programArgs) {
+    const modulePath = _canonicalPath(_modulePathFromUrl(importMetaUrl));
+    const entryPath = _canonicalPath(programArgs?.[0]);
+    return Boolean(modulePath && entryPath && modulePath === entryPath);
+}
+
 function parseArgs(argv) {
     const options = {
         monitor: 0,
@@ -43,7 +68,6 @@ function parseArgs(argv) {
         benchmark: false,
         benchmarkFrames: 300,
         useOffload: true,
-        strictRenderPath: false,
         socketPath: null,
     };
 
@@ -116,9 +140,6 @@ function parseArgs(argv) {
                 index += 1;
             }
             break;
-        case '--strict-render-path':
-            options.strictRenderPath = true;
-            break;
         default:
             break;
         }
@@ -169,7 +190,6 @@ class MilkdropRendererApplication extends Gtk.Application {
 
         const glArea = new MilkdropGLArea({
             standalone: this._options.standalone,
-            strictRenderPath: this._options.strictRenderPath,
             logger: console,
             onBridgeMessage: message => {
                 if (message.type === 'frame-stat' || message.type === 'frame-pixels')
@@ -459,7 +479,6 @@ function runBenchmark(options) {
 
         const glArea = new MilkdropGLArea({
             standalone: true,
-            strictRenderPath: false,
             logger: console,
             onBridgeMessage: message => {
                 if (message.type === 'frame-stat') {
@@ -536,11 +555,17 @@ function runBenchmark(options) {
     app.run([]);
 }
 
-// GJS 1.86+ (GNOME 49) removed import.meta.main; fall back to
-// checking ARGV which is non-empty only when invoked directly.
-const _isMain = import.meta.main ?? (typeof ARGV !== 'undefined' && ARGV.length > 0);
+const PROGRAM_ARGS = imports.system?.programArgs ?? [];
+const CLI_ARGS = PROGRAM_ARGS.length > 0
+    ? PROGRAM_ARGS.slice(1)
+    : (typeof ARGV !== 'undefined' ? ARGV : []);
+
+const _isMain = typeof import.meta.main === 'boolean'
+    ? import.meta.main
+    : _isExecutedAsMain(import.meta.url, PROGRAM_ARGS);
+
 if (_isMain) {
-    const options = parseArgs(ARGV);
+    const options = parseArgs(CLI_ARGS);
     if (options.benchmark) {
         runBenchmark(options);
     } else {

@@ -248,11 +248,10 @@ class ManagedRendererWindow {
 }
 
 class RendererProcess {
-    constructor({extensionPath, monitor, logger, strictRenderPath = false, textOverlayVisible = true, onNotify = null, onExit = null, onHelperCrashed = null}) {
+    constructor({extensionPath, monitor, logger, textOverlayVisible = true, onNotify = null, onExit = null, onHelperCrashed = null}) {
         this._extensionPath = extensionPath;
         this._monitor = monitor;
         this._logger = logger;
-        this._strictRenderPath = strictRenderPath;
         this._textOverlayVisible = Boolean(textOverlayVisible);
         this._pendingTextOverlayVisible = this._textOverlayVisible;
         this._onNotify = onNotify;
@@ -335,9 +334,6 @@ class RendererProcess {
             '--height', `${this._monitor.height}`,
             '--socket-path', this._ipc.socketPath,
         ];
-
-        if (this._strictRenderPath)
-            argv.push('--strict-render-path');
 
         const launcher = new Gio.SubprocessLauncher({
             flags: Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE,
@@ -670,7 +666,6 @@ export class MonitorManager {
         this._enabled = false;
         this._disabling = false;
         this._spawnedMonitorFingerprints = new Map();
-        this._strictRenderPathSupported = this._hasSettingKey('strict-render-path');
         this._pauseWhenFullscreenSupported = this._hasSettingKey('pause-when-fullscreen');
         this._presetRotationModeSupported = this._hasSettingKey('preset-rotation-mode');
         this._beatCutCooldownSupported = this._hasSettingKey('beat-cut-cooldown-sec');
@@ -757,14 +752,6 @@ export class MonitorManager {
             this._settingsSignals.push(
                 this._settings.connect('changed::text-overlay-enabled', () => this._applyTextOverlaySetting())
             );
-        }
-
-        if (this._strictRenderPathSupported) {
-            this._settingsSignals.push(
-                this._settings.connect('changed::strict-render-path', () => this._scheduleRestart('strict-render-path'))
-            );
-        } else {
-            this._logger.info?.('milkdrop strict-render-path setting unavailable in current schema; keeping compatibility mode');
         }
 
         // Track window-focus changes for visibility policies
@@ -961,9 +948,6 @@ export class MonitorManager {
                 extensionPath: this._extensionPath,
                 monitor,
                 logger: this._logger,
-                strictRenderPath: this._strictRenderPathSupported
-                    ? this._getBooleanSetting('strict-render-path', false)
-                    : false,
                 textOverlayVisible: this._getBooleanSetting('text-overlay-enabled', true),
                 onNotify: (title, body) => this._notifyUser(title, body),
                 onExit: (monitorIndex) => this._onRendererExit(monitorIndex),

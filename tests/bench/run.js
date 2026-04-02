@@ -7,6 +7,7 @@
  * reports min/median/p95/max in microseconds.
  */
 import GLib from 'gi://GLib';
+import Gio from 'gi://Gio';
 
 const ARGV = imports.system?.programArgs ?? ARGV ?? [];
 
@@ -78,8 +79,20 @@ async function main() {
     }
 
     const runBench = async (name, modulePath) => {
+        const runFile = Gio.File.new_for_uri(import.meta.url);
+        const runDirPath = runFile.get_parent()?.get_path() ?? GLib.get_current_dir();
+        const modulePathOnDisk = GLib.path_is_absolute(modulePath)
+            ? modulePath
+            : GLib.build_filenamev([runDirPath, modulePath]);
+        const moduleFile = Gio.File.new_for_path(modulePathOnDisk);
+        if (!moduleFile.query_exists(null)) {
+            print(`SKIP: ${name}: benchmark module not found (${modulePath})`);
+            return;
+        }
+        const moduleSpecifier = moduleFile.get_uri();
+
         try {
-            const mod = await import(modulePath);
+            const mod = await import(moduleSpecifier);
             if (typeof mod.run === 'function') {
                 const maybePromise = mod.run(bench);
                 if (maybePromise && typeof maybePromise.then === 'function')

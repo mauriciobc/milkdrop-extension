@@ -138,7 +138,6 @@ export default class MilkdropPreferences extends ExtensionPreferences {
         advancedPage.add(aboutGroup);
 
         addSwitchRow(advancedGroup, settings, 'debug-renderer', _('Debug renderer'), _('Enable verbose renderer logging during development.'));
-        addSwitchRow(advancedGroup, settings, 'strict-render-path', _('Strict render path'), _('Disable legacy Base64 frame fallback and require shared-memory frame transport.'));
         addSpinRow(advancedGroup, settings, 'preset-rotation-interval', _('Preset rotation interval'), _('Seconds between automatic preset changes.'), new Gtk.Adjustment({lower: 0, upper: 600, step_increment: 1, page_increment: 10, value: 0}));
         addComboRow(advancedGroup, settings, 'preset-rotation-mode', _('Preset rotation mode'), _('Applies on the next rotation tick.'), ['random', 'sequential']);
         addSwitchRow(advancedGroup, settings, 'beat-cuts-enabled', _('Beat cuts enabled'), _('Allow beat events to trigger preset changes.'));

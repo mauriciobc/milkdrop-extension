@@ -15,10 +15,10 @@ function _readText(path) {
     return new TextDecoder().decode(bytes);
 }
 
-function _listMilkFiles(dirPath) {
+function _listMilkFilesInDir(dirPath, out) {
     const dir = Gio.File.new_for_path(dirPath);
     let enumerator = null;
-    const out = [];
+    const subdirs = [];
     try {
         enumerator = dir.enumerate_children(
             'standard::name,standard::type',
@@ -30,16 +30,25 @@ function _listMilkFiles(dirPath) {
             if (!info)
                 break;
 
-            if (info.get_file_type() !== Gio.FileType.REGULAR)
-                continue;
+            const fileType = info.get_file_type();
             const name = info.get_name();
-            if (!name.endsWith('.milk'))
-                continue;
-            out.push(GLib.build_filenamev([dirPath, name]));
+
+            if (fileType === Gio.FileType.DIRECTORY) {
+                subdirs.push(GLib.build_filenamev([dirPath, name]));
+            } else if (fileType === Gio.FileType.REGULAR && name.endsWith('.milk')) {
+                out.push(GLib.build_filenamev([dirPath, name]));
+            }
         }
     } finally {
         try { enumerator?.close(null); } catch (_e) {}
     }
+    for (const sub of subdirs)
+        _listMilkFilesInDir(sub, out);
+}
+
+function _listMilkFiles(dirPath) {
+    const out = [];
+    _listMilkFilesInDir(dirPath, out);
     out.sort();
     return out;
 }

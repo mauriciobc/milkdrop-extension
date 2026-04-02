@@ -4,7 +4,7 @@ export function run(assert) {
     // loadPreset(null) clears _preset and blend
     {
         const e = new Evaluator();
-        e.loadPreset({ id: 'p1', name: 'P1', frame: {} });
+        e.loadPreset({ id: 'p1', name: 'P1', baseVals: {}, frame_eqs: '' });
         e.loadPreset(null);
         assert(e._preset === null, 'loadPreset(null) clears _preset');
         assert(e._blendFrom === null, 'loadPreset(null) clears _blendFrom');
@@ -13,7 +13,7 @@ export function run(assert) {
     // loadPreset(preset) sets _preset
     {
         const e = new Evaluator();
-        const preset = { id: 'file:/tmp/demo.milk', name: 'Demo', frame: {} };
+        const preset = { id: 'file:/tmp/demo.milk', name: 'Demo', baseVals: {}, frame_eqs: '' };
         e.loadPreset(preset);
         assert(e._preset === preset, 'loadPreset(preset) sets _preset');
     }
@@ -21,8 +21,8 @@ export function run(assert) {
     // loadPreset with blendDuration > 0 and existing _preset sets _blendFrom
     {
         const e = new Evaluator();
-        const oldPreset = { id: 'old', name: 'Old', frame: {} };
-        const newPreset = { id: 'new', name: 'New', frame: {} };
+        const oldPreset = { id: 'old', name: 'Old', baseVals: {}, frame_eqs: '' };
+        const newPreset = { id: 'new', name: 'New', baseVals: {}, frame_eqs: '' };
         e.loadPreset(oldPreset);
         e.loadPreset(newPreset, 1.0);
         assert(e._blendFrom === oldPreset, 'blend stores previous preset');
@@ -30,19 +30,14 @@ export function run(assert) {
         assert(e._blendDuration === 1.0, 'blend stores duration');
     }
 
-    // evaluateFrame: frameState.t, audio, monitor reflected in result
+    // evaluateFrame: expression presets drive motion/output fields
     {
         const e = new Evaluator();
         const preset = {
             id: 'p1',
             name: 'Preset1',
-            frame: {
-                zoom: { base: 2.0 },
-                rot: { base: 0.1 },
-                dx: { base: 0.05 },
-                dy: { base: -0.05 },
-                decay: { base: 0.95 },
-            },
+            baseVals: { zoom: 2.0, rot: 0.1, dx: 0.05, dy: -0.05, decay: 0.95 },
+            frame_eqs: '',
         };
         e.loadPreset(preset);
         const out = e.evaluateFrame({ t: 10, audio: { pcmLeft: new Float32Array(576), pcmRight: new Float32Array(576) }, monitor: 1 });
@@ -66,6 +61,7 @@ export function run(assert) {
         const out = e.evaluateFrame({ t: 0 });
         assert(out.presetId === null, 'null preset presetId default');
         assert(out.presetName === null, 'null preset presetName default');
+        assert(out.zoom === 1.0 && out.decay === 0.98, 'null preset keeps deterministic default motion');
     }
 
     // expression path receives audio context (no longer computes bands)
@@ -169,29 +165,14 @@ export function run(assert) {
     // blend: first frame after switch sets blendProgress in (0, 1), after duration blendProgress === 1
     {
         const e = new Evaluator();
-        const oldPreset = { id: 'o', name: 'O', frame: { zoom: { base: 1.0 } } };
-        const newPreset = { id: 'n', name: 'N', frame: { zoom: { base: 2.0 } } };
+        const oldPreset = { id: 'o', name: 'O', baseVals: { zoom: 1.0 }, frame_eqs: 'zoom = 1.0;' };
+        const newPreset = { id: 'n', name: 'N', baseVals: { zoom: 2.0 }, frame_eqs: 'zoom = 2.0;' };
         e.loadPreset(oldPreset);
         e.loadPreset(newPreset, 2.0);
         const out1 = e.evaluateFrame({ t: 0 });
         assert(out1.blendProgress >= 0 && out1.blendProgress <= 1, 'blend first frame progress in [0,1]');
         const out2 = e.evaluateFrame({ t: 2.5 });
         assert(out2.blendProgress === 1, 'blend after duration progress 1');
-    }
-
-    // _evaluateWave: no spec returns fallback
-    {
-        const e = new Evaluator();
-        const v = e._evaluateWave(null, 0, 0, 1.5);
-        assert(v === 1.5, '_evaluateWave null spec returns fallback');
-    }
-
-    // _evaluateWave: spec with sin, base, amplitude, frequency
-    {
-        const e = new Evaluator();
-        const spec = { base: 10, amplitude: 2, frequency: 0.5, waveform: 'sin' };
-        const v = e._evaluateWave(spec, 0, 0, 0);
-        assert(v === 10, '_evaluateWave base at time=0');
     }
 
     // _smoothstep: 0->0, 1->1, 0.5->0.5
@@ -255,35 +236,19 @@ export function run(assert) {
         assert(Math.abs(out.zoom - 1.5) < 1e-6, 'expr-to-expr: zoom is blended at mid-transition');
     }
 
-    // Legacy-to-expression blending: verifies that prev values are captured from legacy and used in expr
+    // non-expression presets are rejected by expression-only policy and fall back to defaults
     {
         const e = new Evaluator();
-        const pLegacy = {
-            id: 'plegacy', name: 'PLegacy',
-            frame: { zoom: { base: 3.0 } }
-        };
-        const pExpr = {
-            id: 'pexpr', name: 'PExpr',
-            baseVals: { zoom: 1.0 },
-            frame_eqs: 'zoom = 1.0;'
-        };
-
-        e.loadPreset(pLegacy);
-        e.evaluateFrame({ t: 0 }); // Capture legacy's context (zoom=3.0)
-
-        e.loadPreset(pExpr, 1.0);
-        e.evaluateFrame({ t: 20 }); // set blendStartTime = 20
-        const out = e.evaluateFrame({ t: 20.5 }); // half way
-
-        // At t=20.5, blendProgress = 0.5. smoothstep(0.5) = 0.5.
-        // zoom = 3.0 + (1.0 - 3.0) * 0.5 = 2.0
-        assert(Math.abs(out.zoom - 2.0) < 1e-6, 'legacy-to-expr: zoom is blended at mid-transition');
+        e.loadPreset({id: 'legacy', name: 'Legacy', frame: {zoom: {base: 3.0}}});
+        const out = e.evaluateFrame({ t: 0.1 });
+        assert(out.zoom === 1.0, 'non-expression preset falls back to default zoom');
+        assert(out.decay === 0.98, 'non-expression preset falls back to default decay');
     }
 
     // destroy() clears state
     {
         const e = new Evaluator();
-        e.loadPreset({ id: 'x', name: 'X', frame: {} });
+        e.loadPreset({ id: 'x', name: 'X', baseVals: {}, frame_eqs: '' });
         e.destroy();
         assert(e._preset === null && e._blendFrom === null, 'destroy clears _preset and _blendFrom');
     }

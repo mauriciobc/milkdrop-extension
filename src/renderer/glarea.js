@@ -12,7 +12,7 @@ const FALLBACK_ORB_SIZE_FACTOR = 0.08;
 
 export const MilkdropGLArea = GObject.registerClass(
 class MilkdropGLArea extends Gtk.Widget {
-    constructor({standalone = false, strictRenderPath = false, logger = console, onBridgeMessage = null} = {}) {
+    constructor({standalone = false, logger = console, onBridgeMessage = null} = {}) {
         super({
             hexpand: true,
             vexpand: true,
@@ -33,7 +33,6 @@ class MilkdropGLArea extends Gtk.Widget {
         this._scratchRect = new Graphene.Rect();
         this._scratchColor = new Gdk.RGBA();
         this._glBridge = new GlBridge({
-            strictRenderPath,
             logger: this._logger,
             onMessage: message => this._handleBridgeMessage(message),
         });

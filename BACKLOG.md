@@ -2,9 +2,9 @@
 
 ## Summary
 
-**Total Issues Found:** 12  
-**Completed:** 6  
-**Pending:** 6  
+**Total Issues Found:** 13  
+**Completed:** 8  
+**Pending:** 5  
 
 ## Completed Fixes
 
@@ -16,6 +16,8 @@
 | 4 | Add debug logging to empty catch in `monitor.js:_clearManagedWindow` | Medium | ✅ Done |
 | 5 | Evaluator legacy blend path - verified uses fallback defaults correctly | High | ✅ Not a bug |
 | 6 | Remove `← FIXED:` comment from `audio.js:_defaultFeatures` | Medium | ✅ Done |
+| 7 | Replace fragile renderer entrypoint fallback (`ARGV.length > 0`) | High | ✅ Done |
+| 8 | Remove Legacy WaveSpec path in `evaluator.js` | Medium | ✅ Done |
 
 ---
 
@@ -61,19 +63,6 @@ _hasSettingKey(key) {
     // ...existing logic
 }
 ```
-
----
-
-#### 3. Legacy WaveSpec Path in `evaluator.js`
-**Location:** `evaluator.js:215-255`
-
-The code labeled "Legacy WaveSpec path" is still active and handles presets without expression payloads. The expression-based path (lines 139-213) handles presets with `init_eqs`, `frame_eqs`, or `pixel_eqs`.
-
-**Questions to resolve:**
-- Are WaveSpec presets still used/loaded by the preset store?
-- Can the legacy path be removed or should it be fully documented?
-
-**Current status:** The path is intentionally preserved for backward compatibility with non-expression presets.
 
 ---
 

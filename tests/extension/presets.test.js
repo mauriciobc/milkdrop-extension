@@ -101,6 +101,40 @@ export async function run(assert) {
         }
     }
 
+    // Recursive scan: .milk files in subdirectories are discovered.
+    {
+        const tempDir = GLib.dir_make_tmp('milkdrop-recursive-presets-XXXXXX');
+        const subDir = GLib.build_filenamev([tempDir, 'sub']);
+        GLib.mkdir_with_parents(subDir, 0o755);
+        const topPath = GLib.build_filenamev([tempDir, 'top.milk']);
+        const subPath = GLib.build_filenamev([subDir, 'nested.milk']);
+        const milkContent = '[preset00]\nper_frame_1=zoom=1.0;\n';
+        GLib.file_set_contents(topPath, milkContent);
+        GLib.file_set_contents(subPath, milkContent);
+
+        const settings = {
+            settings_schema: {has_key: key => key === 'preset-directory'},
+            get_string: () => tempDir,
+        };
+
+        try {
+            const recursiveStore = new PresetStore({settings});
+            const index = await recursiveStore.loadIndex();
+            assert(index.some(e => e.id.endsWith('top.milk')),
+                'top-level .milk found by recursive scan');
+            assert(index.some(e => e.id.endsWith('nested.milk')),
+                '.milk in subdirectory found by recursive scan');
+            assert(index.length === 2,
+                'recursive scan returns exactly the right number of presets');
+        } finally {
+            for (const p of [topPath, subPath]) {
+                try { Gio.File.new_for_path(p).delete(null); } catch (_e) {}
+            }
+            try { Gio.File.new_for_path(subDir).delete(null); } catch (_e) {}
+            try { Gio.File.new_for_path(tempDir).delete(null); } catch (_e) {}
+        }
+    }
+
     {
         assert(validatePresetExpressions({
             init_eqs: '',

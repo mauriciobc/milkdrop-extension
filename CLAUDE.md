@@ -89,7 +89,6 @@ Source → Lexer → Parser (AST) → Compiler (closure tree) → Context (state
 ```
 - `per-frame.js`: evaluates `init_eqs` / `frame_eqs` each animation frame
 - `per-pixel.js`: evaluates `pixel_eqs` (compiled to GLSL for per-vertex use)
-- `custom-shapes.js`, `custom-waves.js`: geometry evaluators for overlaid shapes/waveforms
 - `functions.js`: 80+ built-in functions (`sin`, `cos`, `pow`, `log`, `abs`, etc.)
 - `context.js`: frame/pixel state registers and 1MB `megabuf`/`gmegabuf` arrays
 

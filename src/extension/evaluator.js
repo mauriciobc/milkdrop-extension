@@ -65,12 +65,6 @@ function buildRenderControls(source = null) {
     return out;
 }
 
-function isExpressionPreset(preset) {
-    return preset && (typeof preset.init_eqs === 'string' ||
-                      typeof preset.frame_eqs === 'string' ||
-                      typeof preset.pixel_eqs === 'string');
-}
-
 export class Evaluator {
     constructor() {
         this._preset = null;
@@ -100,8 +94,10 @@ export class Evaluator {
         }
         this._preset = preset ?? null;
 
-        // Expression-based preset: compile and init
-        if (isExpressionPreset(preset)) {
+        // ProjectM-compatible path: all accepted presets run through the
+        // expression evaluator; legacy WaveSpec-only presets are no longer
+        // supported.
+        if (preset) {
             if (!this._exprEval)
                 this._exprEval = new ExpressionEvaluator();
             this._exprEval.loadPreset(preset);
@@ -121,9 +117,8 @@ export class Evaluator {
         const blendProgress = this._getBlendProgress(time);
         const preset = this._preset;
         const audio = frameState.audio ?? {};
-        const monitor = frameState.monitor ?? 0;
 
-        // ── Expression-based preset path ──────────────────────────
+        // ── ProjectM-compatible expression path ───────────────────
         if (this._exprEval) {
             const ctx = this._exprEval.evaluateFrame({
                 time,
@@ -154,29 +149,13 @@ export class Evaluator {
             };
         }
 
-        // ── Legacy WaveSpec path ──────────────────────────────────
-        let zoom = this._evaluateWave(preset?.frame?.zoom, time, monitor, DEFAULT_ZOOM);
-        let rot = this._evaluateWave(preset?.frame?.rot, time, monitor, 0.0);
-        let dx = this._evaluateWave(preset?.frame?.dx, time, monitor, 0.0);
-        let dy = this._evaluateWave(preset?.frame?.dy, time, monitor, 0.0);
-        let decay = this._evaluateWave(preset?.frame?.decay, time, monitor, DEFAULT_DECAY);
-
-        if (blendProgress < 1 && this._blendFrom) {
-            const t = this._smoothstep(blendProgress);
-            const oldZoom = this._evaluateWave(this._blendFrom?.frame?.zoom, time, monitor, DEFAULT_ZOOM);
-            const oldRot = this._evaluateWave(this._blendFrom?.frame?.rot, time, monitor, 0.0);
-            const oldDx = this._evaluateWave(this._blendFrom?.frame?.dx, time, monitor, 0.0);
-            const oldDy = this._evaluateWave(this._blendFrom?.frame?.dy, time, monitor, 0.0);
-            const oldDecay = this._evaluateWave(this._blendFrom?.frame?.decay, time, monitor, DEFAULT_DECAY);
-
-            zoom = oldZoom + (zoom - oldZoom) * t;
-            rot = oldRot + (rot - oldRot) * t;
-            dx = oldDx + (dx - oldDx) * t;
-            dy = oldDy + (dy - oldDy) * t;
-            decay = oldDecay + (decay - oldDecay) * t;
-        }
-
-        const renderControls = buildRenderControls(preset);
+        // No preset selected or preset rejected: keep deterministic defaults.
+        const zoom = DEFAULT_ZOOM;
+        const rot = 0.0;
+        const dx = 0.0;
+        const dy = 0.0;
+        const decay = DEFAULT_DECAY;
+        const renderControls = buildRenderControls(null);
 
         // Capture CURRENT final values (blended if in transition) for the next transition.
         this._prevExprCtx = { zoom, rot, dx, dy, decay };
@@ -255,20 +234,4 @@ export class Evaluator {
         return t * t * (3 - 2 * t);
     }
 
-    _evaluateWave(spec, time, monitor, fallback) {
-        if (!spec)
-            return fallback;
-
-        const base = spec.base ?? fallback;
-        const amplitude = spec.amplitude ?? 0;
-        const frequency = spec.frequency ?? 0;
-        const monitorPhase = spec.monitorPhase ?? 0;
-        const phase = spec.phase ?? 0;
-        const waveformInput = time * frequency + monitor * monitorPhase + phase;
-        const wave = spec.waveform === 'cos'
-            ? Math.cos(waveformInput)
-            : Math.sin(waveformInput);
-
-        return base + amplitude * wave;
-    }
 }

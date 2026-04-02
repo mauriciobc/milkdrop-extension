@@ -54,9 +54,9 @@ Include any additional context or decision you make.
 
 #### Q2. Strict render path off by default
 - **Where:** `glarea.js:172`, `org.gnome.shell.extensions.milkdrop.gschema.xml:90-93`
-- **Why this matters:** When `strict-render-path` is false (the default), the renderer silently accepts deprecated Base64 frame payloads. This adds code complexity for backward compatibility that may never be exercised.
-- **Question:** Is there a reason `strict-render-path` defaults to `false`? Should it be `true` by default for new installs, with the Base64 path removed entirely?
-- **Finding:** `deferred` — Design decision. The backward compatibility path exists but is a separate code path, not adding complexity to the main path.
+- **Why this matters:** The `strict-render-path` toggle represented a removed compatibility mode and no longer controlled behavior.
+- **Question:** Should this setting continue to exist now that Base64 frame payloads are always rejected?
+- **Finding:** `bug` — `fixed`. `strict-render-path` was removed from schema/prefs/runtime plumbing. The renderer now has a single SHM/FD-based path, and deprecated Base64 payloads remain unconditionally dropped.
 
 #### Q3. Preset-directory empty state
 - **Where:** `monitor.js:1235-1239`, `presets.js:584-609`
@@ -74,7 +74,7 @@ Include any additional context or decision you make.
 - **Where:** `evaluator.js:190-198`, `gl-bridge.js:343-364`
 - **Why this matters:** `evaluator.js` calls `evaluateCustomWaves()` and `evaluateCustomShapes()` each frame, producing geometry from PCM/spectrum data. However, the results are discarded — they are not forwarded via IPC, and the renderer ignores the preset's wave/shape expression payload (it only renders via projectM built-in shaders).
 - **Question:** Is the custom wave/shape expression evaluation dead code, or is it intended for a future renderer path where the JS-side geometry is forwarded to the C helper for overlay rendering?
-- **Finding:** `bug` — `fixed`. Dead calls to `evaluateCustomWaves()` and `evaluateCustomShapes()` were removed from `evaluator.js`. The evaluator code (`expr/custom-waves.js`, `expr/custom-shapes.js`) remains present but unused. This is the correct behavior since the C helper (projectM) does not support custom wave/shape overlays. Revisit when/if the renderer supports a custom overlay rendering path.
+- **Finding:** `bug` — `fixed`. Dead calls were removed from `evaluator.js`, and the unused evaluator modules (`expr/custom-waves.js`, `expr/custom-shapes.js`) were removed from the codebase.
 
 #### Q6. `spectrumLeft`/`spectrumRight` naming in evaluator
 - **Where:** `evaluator.js:193-198`
@@ -140,7 +140,7 @@ Include any additional context or decision you make.
 
 #### Q15. Expression engine is self-contained but tightly coupled
 - **Where:** `src/extension/expr/`
-- **Why this matters:** The expression engine (lexer, parser, compiler, context, per-frame, per-pixel, custom-waves, custom-shapes) is pure JS with no GI imports. It could theoretically run outside GJS. However, `per-frame.js` is the only entry point and it's directly called by `evaluator.js`. The engine has no interface/abstraction layer.
+- **Why this matters:** The expression engine (lexer, parser, compiler, context, per-frame, per-pixel) is pure JS with no GI imports. It could theoretically run outside GJS. However, `per-frame.js` is the only entry point and it's directly called by `evaluator.js`. The engine has no interface/abstraction layer.
 - **Question:** Is an abstraction layer over the expression engine (interface with `evaluateFrame`, `loadPreset`, `runInit`) desirable for testing or future backend swapping? Currently every call site directly instantiates `ExpressionEvaluator`.
 - **Finding:** `deferred` — Design improvement. The engine is well-factored internally but the API surface is direct. An abstraction layer would help testing but is not critical for current stability.
 
@@ -406,7 +406,7 @@ Include any additional context or decision you make.
 - **Where:** `evaluator.js:193-198`
 - **Why this matters:** `evaluateCustomWaves()` is called each frame and produces wave geometry data (points, colors, rendering flags), but the return value is discarded. This computation is pure overhead — the CPU time spent evaluating custom waves has no observable effect.
 - **Question:** Should `evaluateCustomWaves` be removed until the renderer can consume it, or should it be wired up to forward results via IPC?
-- **Finding:** `bug` — `fixed`. Dead calls to `evaluateCustomWaves()` and `evaluateCustomShapes()` removed from `evaluator.js`. See also Q5.
+- **Finding:** `bug` — `fixed`. Dead calls and associated unused custom-wave/custom-shape evaluator modules were removed. See also Q5.
 
 #### Q54. `compile` allocates megabuf on every execute call
 - **Where:** `expr/compiler.js:22-23`
