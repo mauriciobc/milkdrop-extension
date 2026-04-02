@@ -19,28 +19,83 @@ function addSpinRow(group, settings, key, title, subtitle, adjustment) {
     group.add(row);
 }
 
-function addEntryRow(group, settings, key, title, subtitle) {
+function addAudioSourceRow(group, settings, key, title, subtitle) {
     const row = new Adw.ActionRow({title, subtitle});
-    const entry = new Gtk.Entry({hexpand: true, valign: Gtk.Align.CENTER});
+    const entry = new Gtk.Entry({
+        hexpand: true,
+        valign: Gtk.Align.CENTER,
+        placeholder_text: 'auto or alsa_output.<device>.monitor',
+    });
+    const autoButton = new Gtk.Button({
+        label: _('Use auto'),
+        valign: Gtk.Align.CENTER,
+    });
+
     settings.bind(key, entry, 'text', Gio.SettingsBindFlags.DEFAULT);
+    autoButton.connect('clicked', () => settings.set_string(key, 'auto'));
+
     row.add_suffix(entry);
+    row.add_suffix(autoButton);
     row.activatable_widget = entry;
     group.add(row);
 }
 
 function addComboRow(group, settings, key, title, subtitle, choices) {
+    const normalized = choices.map(choice => {
+        if (typeof choice === 'string')
+            return {value: choice, label: choice};
+        return {value: String(choice.value), label: String(choice.label)};
+    });
+
     const model = new Gtk.StringList();
-    for (const c of choices) model.append(c);
+    for (const c of normalized)
+        model.append(c.label);
+
     const row = new Adw.ComboRow({title, subtitle, model});
-    const indexOf = (val) => choices.indexOf(String(val));
+    const indexOf = (val) => normalized.findIndex(c => c.value === String(val));
     const sync = () => {
         const idx = indexOf(settings.get_string(key));
         if (idx >= 0) row.selected = idx;
     };
     sync();
-    row.connect('notify::selected', () => settings.set_string(key, choices[row.selected] ?? 'random'));
+    row.connect('notify::selected', () => settings.set_string(key, normalized[row.selected]?.value ?? 'random'));
     settings.connect(`changed::${key}`, sync);
     group.add(row);
+}
+
+function addAudioRecoveryExpander(group, settings) {
+    const expander = new Adw.ExpanderRow({
+        title: _('Audio Recovery'),
+        subtitle: _('Use these only when audio keeps dropping or failing to reconnect'),
+    });
+
+    const restartRow = new Adw.ActionRow({
+        title: _('Restart Attempt Budget'),
+        subtitle: _('Maximum restarts before safe fallback mode is enabled'),
+    });
+    const restartSpin = new Gtk.SpinButton({
+        adjustment: new Gtk.Adjustment({lower: 0, upper: 100, step_increment: 1, page_increment: 5, value: 3}),
+        valign: Gtk.Align.CENTER,
+    });
+    settings.bind('audio-restart-max-attempts', restartSpin, 'value', Gio.SettingsBindFlags.DEFAULT);
+    restartRow.add_suffix(restartSpin);
+    restartRow.activatable_widget = restartSpin;
+
+    const reprobeRow = new Adw.ActionRow({
+        title: _('Reprobe Delay'),
+        subtitle: _('Delay before monitor-source discovery retries in fallback mode'),
+    });
+    const reprobeSpin = new Gtk.SpinButton({
+        adjustment: new Gtk.Adjustment({lower: 250, upper: 120000, step_increment: 50, page_increment: 500, value: 2500}),
+        valign: Gtk.Align.CENTER,
+    });
+    settings.bind('audio-reprobe-delay-ms', reprobeSpin, 'value', Gio.SettingsBindFlags.DEFAULT);
+    reprobeRow.add_suffix(reprobeSpin);
+    reprobeRow.activatable_widget = reprobeSpin;
+
+    expander.add_row(restartRow);
+    expander.add_row(reprobeRow);
+    group.add(expander);
 }
 
 function addFolderRow(group, settings, key, title, subtitle, parentWindow) {
@@ -83,6 +138,7 @@ export default class MilkdropPreferences extends ExtensionPreferences {
         const settings = this.getSettings();
 
         window.set_default_size(720, 640);
+        window.search_enabled = true;
 
         const displayPage = new Adw.PreferencesPage({
             title: _('Display'),
@@ -92,16 +148,21 @@ export default class MilkdropPreferences extends ExtensionPreferences {
 
         const displayGroup = new Adw.PreferencesGroup({
             title: _('Desktop behavior'),
-            description: _('Visibility and performance controls for running the renderer on your desktop.'),
+            description: _('Visibility controls for running the renderer on your desktop'),
+        });
+        const displayPerformanceGroup = new Adw.PreferencesGroup({
+            title: _('Performance'),
+            description: _('Frame-rate limits that affect CPU and GPU usage'),
         });
         displayPage.add(displayGroup);
+        displayPage.add(displayPerformanceGroup);
 
-        addSwitchRow(displayGroup, settings, 'hide-when-maximized', _('Hide when maximized'), _('Pause visual presence when a window is maximized.'));
-        addSwitchRow(displayGroup, settings, 'show-on-empty-desktop-only', _('Empty desktop only'), _('Pause unless your desktop is empty (no normal windows visible).'));
-        addSwitchRow(displayGroup, settings, 'text-overlay-enabled', _('Text overlay'), _('Show or hide status text drawn over visualizations.'));
-        addSwitchRow(displayGroup, settings, 'pause-when-fullscreen', _('Pause when fullscreen'), _('Immediately pause rendering while the focused window is fullscreen.'));
-        addSwitchRow(displayGroup, settings, 'show-only-when-media-playing', _('Only when media is playing'), _('Pause visualizations when no MPRIS player is playing. Saves CPU and GPU until you start music or video.'));
-        addSpinRow(displayGroup, settings, 'fps-limit', _('FPS limit'), _('Limit the renderer frame rate.'), new Gtk.Adjustment({lower: 30, upper: 240, step_increment: 1, page_increment: 10, value: 60}));
+        addSwitchRow(displayGroup, settings, 'show-only-when-media-playing', _('Only When Media Is Playing'), _('Pause visualizations when no MPRIS player is playing to save CPU and GPU'));
+        addSwitchRow(displayGroup, settings, 'pause-when-fullscreen', _('Pause When Fullscreen'), _('Pause rendering while the focused window is fullscreen'));
+        addSwitchRow(displayGroup, settings, 'hide-when-maximized', _('Hide When Maximized'), _('Pause visual presence when a window is maximized'));
+        addSwitchRow(displayGroup, settings, 'show-on-empty-desktop-only', _('Empty Desktop Only'), _('Pause unless no normal windows are visible'));
+        addSwitchRow(displayGroup, settings, 'text-overlay-enabled', _('Text Overlay'), _('Show status text over visualizations'));
+        addSpinRow(displayPerformanceGroup, settings, 'fps-limit', _('FPS Limit'), _('Limit the renderer frame rate'), new Gtk.Adjustment({lower: 30, upper: 240, step_increment: 1, page_increment: 10, value: 60}));
 
         const audioPage = new Adw.PreferencesPage({
             title: _('Audio'),
@@ -110,45 +171,47 @@ export default class MilkdropPreferences extends ExtensionPreferences {
         window.add(audioPage);
 
         const audioGroup = new Adw.PreferencesGroup({
-            title: _('Signal input'),
-            description: _('Audio capture settings used for beat detection and audio-reactive visuals.'),
+            title: _('Audio Input'),
+            description: _('Audio capture settings for beat detection and audio-reactive visuals'),
         });
         audioPage.add(audioGroup);
 
-        addEntryRow(audioGroup, settings, 'audio-source', _('Audio source'), _('Output monitor source name (for example alsa_output...monitor) or auto (never microphone fallback).'));
-        addSpinRow(audioGroup, settings, 'audio-restart-max-attempts', _('Audio restart max attempts'), _('Applies after audio pipeline restart/reprobe.'), new Gtk.Adjustment({lower: 0, upper: 100, step_increment: 1, page_increment: 5, value: 3}));
-        addSpinRow(audioGroup, settings, 'audio-reprobe-delay-ms', _('Audio reprobe delay (ms)'), _('Applies after audio pipeline restart/reprobe.'), new Gtk.Adjustment({lower: 250, upper: 120000, step_increment: 50, page_increment: 500, value: 2500}));
+        addAudioSourceRow(audioGroup, settings, 'audio-source', _('Audio Source'), _('Use auto for automatic output monitor selection with no microphone fallback'));
+        addAudioRecoveryExpander(audioGroup, settings);
 
-        const advancedPage = new Adw.PreferencesPage({
-            title: _('Advanced'),
-            icon_name: 'applications-system-symbolic',
+        const presetsPage = new Adw.PreferencesPage({
+            title: _('Presets'),
+            icon_name: 'media-playlist-shuffle-symbolic',
         });
-        window.add(advancedPage);
+        window.add(presetsPage);
 
-        const advancedGroup = new Adw.PreferencesGroup({
-            title: _('Renderer'),
-            description: _('Debug and preset storage settings.'),
+        const presetGroup = new Adw.PreferencesGroup({
+            title: _('Preset Behavior'),
+            description: _('Control preset switching and transition behavior'),
         });
-        const aboutGroup = new Adw.PreferencesGroup({
-            title: _('Project'),
-            description: _('Current scaffold state and installation target.'),
+        const libraryGroup = new Adw.PreferencesGroup({
+            title: _('Preset Library'),
+            description: _('Optional external folder used to discover additional .milk presets'),
         });
 
-        advancedPage.add(advancedGroup);
-        advancedPage.add(aboutGroup);
+        presetsPage.add(presetGroup);
+        presetsPage.add(libraryGroup);
 
-        addSwitchRow(advancedGroup, settings, 'debug-renderer', _('Debug renderer'), _('Enable verbose renderer logging during development.'));
-        addSpinRow(advancedGroup, settings, 'preset-rotation-interval', _('Preset rotation interval'), _('Seconds between automatic preset changes.'), new Gtk.Adjustment({lower: 0, upper: 600, step_increment: 1, page_increment: 10, value: 0}));
-        addComboRow(advancedGroup, settings, 'preset-rotation-mode', _('Preset rotation mode'), _('Applies on the next rotation tick.'), ['random', 'sequential']);
-        addSwitchRow(advancedGroup, settings, 'beat-cuts-enabled', _('Beat cuts enabled'), _('Allow beat events to trigger preset changes.'));
-        addSpinRow(advancedGroup, settings, 'beat-cut-cooldown-sec', _('Beat-cut cooldown (sec)'), _('Minimum seconds between beat-triggered preset cuts (applies immediately).'), new Gtk.Adjustment({lower: 0.0, upper: 30.0, step_increment: 0.1, page_increment: 0.5, value: 2.0}));
-        addSpinRow(advancedGroup, settings, 'blend-time', _('Blend time'), _('Seconds used for preset blending.'), new Gtk.Adjustment({lower: 0.0, upper: 10.0, step_increment: 0.1, page_increment: 0.5, value: 2.0}));
-        addFolderRow(advancedGroup, settings, 'preset-directory', _('Preset directory'), _('Optional external preset path.'), window);
-
-        const statusRow = new Adw.ActionRow({
-            title: _('Scaffold status'),
-            subtitle: _('Local-first GNOME 47-49 extension with a split-process renderer.'),
-        });
-        aboutGroup.add(statusRow);
+        addSpinRow(presetGroup, settings, 'preset-rotation-interval', _('Preset Rotation Interval'), _('Seconds between automatic preset changes, set 0 to disable auto-rotation'), new Gtk.Adjustment({lower: 0, upper: 600, step_increment: 1, page_increment: 10, value: 0}));
+        addComboRow(
+            presetGroup,
+            settings,
+            'preset-rotation-mode',
+            _('Preset Rotation Mode'),
+            _('Applies on the next rotation tick'),
+            [
+                {value: 'random', label: _('Random')},
+                {value: 'sequential', label: _('Sequential')},
+            ]
+        );
+        addSwitchRow(presetGroup, settings, 'beat-cuts-enabled', _('Beat Cuts Enabled'), _('Allow beat events to trigger preset changes'));
+        addSpinRow(presetGroup, settings, 'beat-cut-cooldown-sec', _('Beat-cut Cooldown'), _('Minimum seconds between beat-triggered preset cuts'), new Gtk.Adjustment({lower: 0.0, upper: 30.0, step_increment: 0.1, page_increment: 0.5, value: 2.0}));
+        addSpinRow(presetGroup, settings, 'blend-time', _('Blend Time'), _('Seconds used for preset blending'), new Gtk.Adjustment({lower: 0.0, upper: 10.0, step_increment: 0.1, page_increment: 0.5, value: 2.0}));
+        addFolderRow(libraryGroup, settings, 'preset-directory', _('Preset Directory'), _('Optional external preset path'), window);
     }
 }

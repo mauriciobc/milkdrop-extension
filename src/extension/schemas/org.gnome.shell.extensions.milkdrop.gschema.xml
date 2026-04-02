@@ -72,11 +72,6 @@
       <summary>Audio reprobe delay</summary>
       <description>Delay in milliseconds before retrying monitor-source selection when auto mode is in fallback.</description>
     </key>
-    <key name="debug-renderer" type="b">
-      <default>false</default>
-      <summary>Debug renderer</summary>
-      <description>Enable verbose renderer logging while developing.</description>
-    </key>
     <key name="preset-rotation-mode" type="s">
       <default>'random'</default>
       <summary>Preset rotation mode</summary>
