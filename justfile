@@ -31,7 +31,7 @@ renderer:
     gjs -m src/renderer/renderer.js --monitor 0 --width 1280 --height 720 --standalone
 
 nested:
-    GSETTINGS_BACKEND=memory MUTTER_DEBUG_DUMMY_MODE_SPECS=1280x720 G_MESSAGES_DEBUG=all SHELL_DEBUG=all dbus-run-session gnome-shell --devkit --wayland
+    ./tools/nested.sh
 
 logs:
     journalctl -f -o cat /usr/bin/gnome-shell

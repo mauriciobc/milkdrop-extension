@@ -25,7 +25,13 @@ Use a nested shell for extension lifecycle work whenever possible.
 
 Run:
 
-dbus-run-session gnome-shell --devkit --wayland
+just nested
+
+This launcher uses an isolated config/keyfile-based GSettings backend for the
+nested session. Settings changes then propagate correctly between
+`gnome-shell` and extension prefs while keeping your main-session dconf
+state untouched, and extension discovery still uses your normal installed
+user extension directory.
 
 Inside the nested session, enable the extension through gnome-extensions.
 

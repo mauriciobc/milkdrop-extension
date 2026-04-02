@@ -21,7 +21,9 @@ function buildManagedWindowTitle(options) {
         position: [options.x, options.y],
         size: [options.width, options.height],
         keepAtBottom: true,
-        keepMinimized: true,
+        // Keep visible and pinned instead of minimized. Minimization can race
+        // with clone visibility and make the renderer appear to disappear.
+        keepMinimized: false,
         keepPosition: true,
     };
 
@@ -317,7 +319,7 @@ class MilkdropRendererApplication extends Gtk.Application {
                         return GLib.SOURCE_REMOVE;
                     const a = this._lastFrame?.audio;
                     if (a != null)
-                        console.debug(`milkdrop renderer audio debug: source=${a.source ?? '?'} active=${a.active} energy=${(a.energy ?? 0).toFixed(3)} bass=${(a.bass ?? 0).toFixed(3)} mid=${(a.mid ?? 0).toFixed(3)} high=${(a.high ?? 0).toFixed(3)}`);
+                        console.debug(`milkdrop renderer audio debug: source=${a.source ?? '?'} active=${a.active}`);
                     return GLib.SOURCE_CONTINUE;
                 });
             }
@@ -357,7 +359,7 @@ class MilkdropRendererApplication extends Gtk.Application {
         const audio = this._lastFrame?.audio;
         const audioText = !audio
             ? 'audio (no data)'
-            : `audio source=${audio.source ?? '?'} ${audio.active ? 'active' : 'inactive'} energy=${(audio.energy ?? 0).toFixed(2)} b=${(audio.bass ?? 0).toFixed(2)} m=${(audio.mid ?? 0).toFixed(2)} h=${(audio.high ?? 0).toFixed(2)} beat=${audio.beat ?? 0}`;
+            : `audio source=${audio.source ?? '?'} ${audio.active ? 'active' : 'inactive'}`;
         const text = `${frameText}\n${presetText}\n${helperText}\n${audioText}\nbridge ${this._bridgeStatusText}`;
         if (text !== this._lastStatusLabelText) {
             this._statusLabel.set_label(text);

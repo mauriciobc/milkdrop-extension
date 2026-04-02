@@ -991,7 +991,7 @@ export class MonitorManager {
                 if (_debugIpc() && this._frameCounter % Math.max(1, fpsLimit) === 0) {
                     const f = this._audioEngine.getFeatures();
                     this._logger.info?.(
-                        `milkdrop audio debug: source=${f.source} active=${f.active} energy=${(f.energy ?? 0).toFixed(3)} bass=${(f.bass ?? 0).toFixed(3)} mid=${(f.mid ?? 0).toFixed(3)} high=${(f.high ?? 0).toFixed(3)} beat=${f.beat ?? 0}`
+                        `milkdrop audio debug: source=${f.source} active=${f.active}`
                     );
                 }
 
@@ -1582,7 +1582,10 @@ export class MonitorManager {
                 this._stopAfterFadeId = 0;
                 if (!this._enabled || this._disabling)
                     return GLib.SOURCE_REMOVE;
-                const stillVisible = !showOnlyWhenMedia || this._mprisWatcher?.hasActivePlayback;
+                // Re-read setting/playback state at callback time to avoid
+                // stopping renderers based on stale visibility inputs.
+                const showOnlyWhenMediaNow = this._getBooleanSetting('show-only-when-media-playing', false);
+                const stillVisible = !showOnlyWhenMediaNow || this._mprisWatcher?.hasActivePlayback;
                 if (stillVisible)
                     return GLib.SOURCE_REMOVE;
                 this._stopAll();
