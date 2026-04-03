@@ -59,6 +59,8 @@ async function main() {
     await runTest('renderer/ipc-client', './renderer/ipc-client.test.js');
     await runTest('renderer/preset-load-contract', './renderer/preset-load-contract.test.js');
     await runTest('renderer/renderer', './renderer/renderer.test.js');
+    await runTest('renderer/meson-projectm-dependency', './renderer/meson-projectm-dependency.test.js');
+    await runTest('renderer/projectm-integration-contract', './renderer/projectm-integration-contract.test.js');
     await runTest('extension/expr/lexer', './extension/expr/lexer.test.js');
     await runTest('extension/expr/parser', './extension/expr/parser.test.js');
     await runTest('extension/expr/compiler', './extension/expr/compiler.test.js');
