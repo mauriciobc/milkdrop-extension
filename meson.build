@@ -74,7 +74,16 @@ if has_c_compiler
   math_dep = c_compiler.find_library('m', required: false)
   sysprof_dep = dependency('sysprof-capture-4', required: false)
 
-  projectm_dep = dependency('projectM-4', required: true)
+  projectm_dep = dependency('libprojectm', required: false)
+  if not projectm_dep.found()
+    projectm_dep = dependency('projectM-4', required: false)
+  endif
+  if not projectm_dep.found()
+    error('libprojectM not found. Install libprojectM 4.x development files (pkg-config: libprojectm or projectM-4).')
+  endif
+  if not c_compiler.has_header('projectM-4/core.h', dependencies: projectm_dep)
+    error('projectM 4.x C API headers were not found (missing projectM-4/core.h). projectM 3.x is not supported by this renderer helper.')
+  endif
   has_cxx = add_languages('cpp', required: true, native: false)
   cxx_compiler = meson.get_compiler('cpp')
   stdcpp_dep = cxx_compiler.find_library('stdc++', required: true)

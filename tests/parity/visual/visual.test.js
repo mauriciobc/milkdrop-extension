@@ -48,6 +48,14 @@ function parseArgs(argv) {
     return opts;
 }
 
+function firstExistingPath(paths, testFlag = GLib.FileTest.EXISTS) {
+    for (const p of paths) {
+        if (GLib.file_test(p, testFlag))
+            return p;
+    }
+    return null;
+}
+
 function comparePixels(bufferA, bufferB, width, height) {
     if (bufferA.length !== bufferB.length) {
         return { match: false, diffPercent: 100, maxDiff: 0 };
@@ -80,17 +88,31 @@ function comparePixels(bufferA, bufferB, width, height) {
 export function run(assert) {
     const results = [];
     const opts = parseArgs(ARGV ?? []);
+    const requireProjectMArtifacts = Boolean(opts.compare);
     
     print('\n=== Visual Parity Tests ===');
     print(`Display available: ${checkDisplayAvailable()}`);
     
     const hasDisplay = checkDisplayAvailable();
+    const projectMBuildPath = firstExistingPath([
+        'projectm/build',
+        '../projectm/build',
+        '../../projectm/build',
+    ], GLib.FileTest.IS_DIR);
+    const projectMPresetPath = firstExistingPath([
+        'projectm/presets/tests/101-per_frame.milk',
+        '../projectm/presets/tests/101-per_frame.milk',
+        '../../projectm/presets/tests/101-per_frame.milk',
+    ]);
     
     // Test 1: Check ProjectM build exists
     results.push(runTest('ProjectM build directory exists', () => {
-        const buildDir = 'projectm/build';
-        const exists = GLib.file_test(buildDir, GLib.FileTest.IS_DIR);
-        return { pass: exists, expected: 'build dir exists', actual: exists ? 'exists' : 'not found' };
+        const exists = Boolean(projectMBuildPath);
+        return {
+            pass: exists || !requireProjectMArtifacts,
+            expected: requireProjectMArtifacts ? 'build dir exists' : 'optional for default parity run',
+            actual: exists ? `found at ${projectMBuildPath}` : 'not found',
+        };
     }));
     
     // Test 2: Check ProjectM SDL test UI exists (or needs building)
@@ -116,22 +138,12 @@ export function run(assert) {
     
     // Test 3: Check test presets available - use file existence check
     results.push(runTest('ProjectM test presets available', () => {
-        // Try to read one known preset file
-        const testPresetPaths = [
-            'projectm/presets/tests/101-per_frame.milk',
-            '../projectm/presets/tests/101-per_frame.milk',
-            '../../projectm/presets/tests/101-per_frame.milk',
-        ];
-        
-        let found = false;
-        for (const presetPath of testPresetPaths) {
-            const [ok] = GLib.file_get_contents(presetPath);
-            if (ok) {
-                found = true;
-                break;
-            }
-        }
-        return { pass: found, expected: 'presets available', actual: found ? 'found' : 'not found' };
+        const found = Boolean(projectMPresetPath);
+        return {
+            pass: found || !requireProjectMArtifacts,
+            expected: requireProjectMArtifacts ? 'presets available' : 'optional for default parity run',
+            actual: found ? `found at ${projectMPresetPath}` : 'not found',
+        };
     }));
     
     // Test 4: Verify renderer source exists
